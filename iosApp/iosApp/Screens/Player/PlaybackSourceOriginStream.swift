@@ -164,9 +164,15 @@ enum PlaybackOriginStreamPolicy {
     static func shouldPause(
         writeCursor: Int64,
         demandMark: Int64,
-        globalBudgetAvailable: Bool
+        globalBudgetAvailable: Bool,
+        maximumAheadBytes: Int64? = nil
     ) -> Bool {
         if demandMark >= writeCursor { return false }
+        if let maximumAheadBytes,
+           maximumAheadBytes >= 0,
+           writeCursor - demandMark >= maximumAheadBytes {
+            return true
+        }
         return !globalBudgetAvailable
     }
 }

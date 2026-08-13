@@ -731,6 +731,11 @@ private final class PlaybackSourceResource {
     private var windowStream: PlaybackOriginStream?
     private var chunkFetcher: PlaybackOriginChunkFetcher?
     private var demandCounter: UInt64 = 0
+    /// Optional startup-only lead limit for the sequential origin window.
+    /// Guarded by `stateLock`; nil means the normal cache high-water policy.
+    /// The cap follows the consumer's demand mark, so it can never strand a
+    /// blocked read and does not reduce the total bytes a title may consume.
+    private var startupPrefetchMaximumAheadBytes: Int64?
     /// Current playback rate (1.0 = normal). Cache drain time — and thus the
     /// adaptive detach grace — scales with consumption speed, not the file's
     /// nominal bitrate. Guarded by `stateLock`.
@@ -776,7 +781,8 @@ private final class PlaybackSourceResource {
         outageRideThroughEnabled: Bool = PlaybackOriginOutagePolicy.rideThroughEnabled(),
         resumeCapable: Bool,
         serverAdvertisesDirectStreamResume: Bool,
-        originStreamClock: PlaybackOriginStreamClock
+        originStreamClock: PlaybackOriginStreamClock,
+        startupPrefetchMaximumAheadBytes: Int64? = nil
     ) {
         self.token = Self.makeToken()
         self.originURL = originURL
@@ -789,6 +795,7 @@ private final class PlaybackSourceResource {
         self.resumeCapable = resumeCapable
         self.serverAdvertisesDirectStreamResume = serverAdvertisesDirectStreamResume
         self.originStreamClock = originStreamClock
+        self.startupPrefetchMaximumAheadBytes = startupPrefetchMaximumAheadBytes.map { max(0, $0) }
     }
 
     deinit {
@@ -1022,6 +1029,22 @@ private final class PlaybackSourceResource {
         stateLock.lock()
         playbackRate = rate
         stateLock.unlock()
+    }
+
+    /// Lift the startup-only speculative lead limit without replacing the
+    /// warm URLSession connection. A parked stream is nudged after the state
+    /// transition so it can immediately fill toward the cache high-water mark.
+    func releaseStartupPrefetchLimit() {
+        var windowToResume: PlaybackOriginStream?
+        stateLock.lock()
+        if startupPrefetchMaximumAheadBytes != nil {
+            startupPrefetchMaximumAheadBytes = nil
+            windowToResume = windowStream
+        }
+        stateLock.unlock()
+        guard let windowToResume else { return }
+        Self.logger.info("[CMP-SOURCE-CACHE] startup prefetch lead limit released")
+        windowToResume.resumeFillingIfNeeded()
     }
 
     private func currentPlaybackRate() -> Double {
@@ -2008,11 +2031,13 @@ private final class PlaybackSourceResource {
             stateLock.unlock()
             return false
         }
+        let maximumAheadBytes = startupPrefetchMaximumAheadBytes
         stateLock.unlock()
         return !PlaybackOriginStreamPolicy.shouldPause(
             writeCursor: cursor,
             demandMark: demandMark,
-            globalBudgetAvailable: cache.shouldPrefetch
+            globalBudgetAvailable: cache.shouldPrefetch,
+            maximumAheadBytes: maximumAheadBytes
         )
     }
 
@@ -2072,7 +2097,8 @@ final class PlaybackSourceProxy {
         outageRideThroughEnabled: Bool = PlaybackOriginOutagePolicy.rideThroughEnabled(),
         resumeCapable: Bool = false,
         serverAdvertisesDirectStreamResume: Bool = false,
-        originStreamClock: PlaybackOriginStreamClock = SystemPlaybackOriginStreamClock()
+        originStreamClock: PlaybackOriginStreamClock = SystemPlaybackOriginStreamClock(),
+        startupPrefetchMaximumAheadBytes: Int64? = nil
     ) {
         self.resource = PlaybackSourceResource(
             originURL: originURL,
@@ -2084,7 +2110,8 @@ final class PlaybackSourceProxy {
             outageRideThroughEnabled: outageRideThroughEnabled,
             resumeCapable: resumeCapable,
             serverAdvertisesDirectStreamResume: serverAdvertisesDirectStreamResume,
-            originStreamClock: originStreamClock
+            originStreamClock: originStreamClock,
+            startupPrefetchMaximumAheadBytes: startupPrefetchMaximumAheadBytes
         )
     }
 
@@ -2184,6 +2211,10 @@ final class PlaybackSourceProxy {
 
     func startPrefetch(at offset: Int64 = 0) {
         resource.startPrefetch(at: offset)
+    }
+
+    func releaseStartupPrefetchLimit() {
+        resource.releaseStartupPrefetchLimit()
     }
 
     /// Swap the origin endpoint in place after a silent session renewal.
