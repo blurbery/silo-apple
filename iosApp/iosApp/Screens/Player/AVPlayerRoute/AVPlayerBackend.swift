@@ -384,6 +384,11 @@ final class AVPlayerBackend {
         case siloLoopback(spec: LoopbackSessionSpec)
     }
 
+    enum StartupBufferPolicy: Equatable {
+        case systemDefault
+        case fastStart(forwardBufferDuration: Double)
+    }
+
     private struct MediaSelectionState {
         let kind: PlayerTrack.Kind
         let group: AVMediaSelectionGroup
@@ -399,6 +404,10 @@ final class AVPlayerBackend {
     /// creation. Sized for fast initial readyToPlay — AVPlayer otherwise
     /// waits for whole GOP-sized fragments before declaring ready.
     private static let loopbackStartupForwardBuffer: Double = 4.0
+    /// Server HLS already arrives as short, independently playable media
+    /// fragments. Keep only a small explicit startup cushion so AVPlayer does
+    /// not add several seconds of conservative pre-roll after media is ready.
+    private static let remoteHLSStartupForwardBuffer: Double = 1.0
     /// Local loopback startup watchdog (AetherEngine-style, replaces the old
     /// fixed 12 s readiness timeout that killed healthy-but-slow startups —
     /// living-room DV P7 + TrueHD→FLAC at a far resume needed >12 s while
@@ -528,6 +537,17 @@ final class AVPlayerBackend {
     /// fetchable. This mirrors AetherEngine's proven loopback-HLS policy.
     private static func loopbackVODForwardBufferTarget(targetDuration: Double?) -> Double {
         loopbackStartupForwardBuffer
+    }
+
+    static func startupBufferPolicy(for strategy: SourceStrategy?) -> StartupBufferPolicy {
+        switch strategy {
+        case .some(.remoteHLS):
+            return .fastStart(forwardBufferDuration: remoteHLSStartupForwardBuffer)
+        case .some(.siloLoopback):
+            return .fastStart(forwardBufferDuration: loopbackStartupForwardBuffer)
+        case .some(.remoteDirect), .none:
+            return .systemDefault
+        }
     }
 
     private static func loopbackLiveEdgeForwardBufferFloor(
@@ -2185,7 +2205,7 @@ final class AVPlayerBackend {
                 if previousBitrate == nil, bitsPerSecond != nil,
                    let item = self.currentItem,
                    self.canRampLoopbackBufferToSteadyState {
-                    self.rampLoopbackBufferToSteadyStateIfNeeded(for: item)
+                    self.transitionStartupBufferToSteadyStateIfNeeded(for: item)
                 }
             }
         }
@@ -2197,7 +2217,7 @@ final class AVPlayerBackend {
                 self.emitPlaybackStats(referenceTime: self.currentTime(), force: true)
                 if let item = self.currentItem,
                    self.canRampLoopbackBufferToSteadyState {
-                    self.rampLoopbackBufferToSteadyStateIfNeeded(for: item)
+                    self.transitionStartupBufferToSteadyStateIfNeeded(for: item)
                     self.sampleLocalLoopbackEdge(item: item, referenceTime: self.currentTime(), trigger: "generated_stats")
                 }
             }
@@ -2347,16 +2367,25 @@ final class AVPlayerBackend {
         // over the source's bitrate is small (e.g. 4K DV at 72 Mbps over
         // 80 Mbps).
         //
-        // Remote routes keep AVPlayer's defaults since automatic buffering
-        // is genuinely useful over the WAN.
-        if case .siloLoopback = currentSourceStrategy {
+        // Server HLS gets the same two-phase treatment with a smaller startup
+        // target: start from the first available fragment, then restore
+        // AVPlayer's automatic WAN buffering immediately after the first
+        // displayed frame. Direct-file playback keeps the system defaults.
+        switch Self.startupBufferPolicy(for: currentSourceStrategy) {
+        case .fastStart(let forwardBufferDuration):
             avPlayer.automaticallyWaitsToMinimizeStalling = false
-            item.preferredForwardBufferDuration = Self.loopbackStartupForwardBuffer
-            // Do not let AVPlayer poll the local EVENT playlist while paused.
-            // Under disk pressure the writer may pause appends until playback
-            // frees spill capacity; paused polling can therefore see an
-            // unchanged playlist long enough for CoreMedia to fail the item.
-            item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+            item.preferredForwardBufferDuration = forwardBufferDuration
+            if case .siloLoopback = currentSourceStrategy {
+                // Do not let AVPlayer poll the local EVENT playlist while
+                // paused. Under disk pressure the writer may pause appends
+                // until playback frees spill capacity; paused polling can
+                // therefore see an unchanged playlist long enough for
+                // CoreMedia to fail the item.
+                item.canUseNetworkResourcesForLiveStreamingWhilePaused = false
+            }
+        case .systemDefault:
+            avPlayer.automaticallyWaitsToMinimizeStalling = true
+            item.preferredForwardBufferDuration = 0
         }
         currentItem = item
         beginInitialVideoDisplayGate()
@@ -3722,7 +3751,13 @@ final class AVPlayerBackend {
 
     private func startPlaybackIfNeeded(for item: AVPlayerItem) {
         armInitialVideoDisplayGateIfNeeded()
-        avPlayer.play()
+        if isWaitingForInitialVideoDisplay,
+           case .fastStart = Self.startupBufferPolicy(for: currentSourceStrategy) {
+            avPlayer.playImmediately(atRate: 1.0)
+            Self.logger.info("[CMP-AVP] requested immediate startup playback")
+        } else {
+            avPlayer.play()
+        }
         if isWaitingForInitialVideoDisplay {
             scheduleInitialVideoDisplayFallback(for: item)
         } else {
@@ -3934,7 +3969,7 @@ final class AVPlayerBackend {
             avPlayer.isMuted = false
             didTemporarilyMuteForInitialVideoDisplay = false
         }
-        rampLoopbackBufferToSteadyStateIfNeeded(for: item)
+        transitionStartupBufferToSteadyStateIfNeeded(for: item)
         Self.logger.info("[CMP-AVP] initial video display gate released reason=\(reason, privacy: .public)")
     }
 
@@ -3942,27 +3977,40 @@ final class AVPlayerBackend {
     /// state target and re-enable automatic waiting. EVENT playlists expand
     /// their live-edge cushion; static VOD playlists stay near one segment so
     /// AVPlayer cannot outrun the bounded producer window.
-    private func rampLoopbackBufferToSteadyStateIfNeeded(for item: AVPlayerItem) {
-        guard case .siloLoopback(let spec) = currentSourceStrategy else { return }
-        guard canRampLoopbackBufferToSteadyState else { return }
-        let generatedStats = latestLoopbackGeneratedStats
-        let mediaBitrate = generatedStats?.rollingBitrateBps ?? spec.sourceBitrateBps
-        let target = Self.loopbackSteadyStateForwardBufferTarget(
-            forBitsPerSecond: mediaBitrate,
-            targetDuration: generatedStats.map { Double($0.targetDuration) },
-            longestSegmentDuration: generatedStats?.longestSegmentDuration,
-            servingMode: spec.servingMode
-        )
-        let shouldRaiseForwardBuffer = item.preferredForwardBufferDuration < target
-        let shouldEnableAutomaticWaiting = !avPlayer.automaticallyWaitsToMinimizeStalling
-        guard shouldRaiseForwardBuffer || shouldEnableAutomaticWaiting else { return }
-        if shouldRaiseForwardBuffer {
-            item.preferredForwardBufferDuration = target
+    private func transitionStartupBufferToSteadyStateIfNeeded(for item: AVPlayerItem) {
+        switch currentSourceStrategy {
+        case .some(.remoteHLS):
+            let shouldResetForwardBuffer = item.preferredForwardBufferDuration != 0
+            let shouldEnableAutomaticWaiting = !avPlayer.automaticallyWaitsToMinimizeStalling
+            guard shouldResetForwardBuffer || shouldEnableAutomaticWaiting else { return }
+            item.preferredForwardBufferDuration = 0
+            avPlayer.automaticallyWaitsToMinimizeStalling = true
+            Self.logger.info(
+                "[CMP-AVP] remote HLS startup buffer released forwardBuffer=system automaticallyWaits=1"
+            )
+        case .some(.siloLoopback(let spec)):
+            guard canRampLoopbackBufferToSteadyState else { return }
+            let generatedStats = latestLoopbackGeneratedStats
+            let mediaBitrate = generatedStats?.rollingBitrateBps ?? spec.sourceBitrateBps
+            let target = Self.loopbackSteadyStateForwardBufferTarget(
+                forBitsPerSecond: mediaBitrate,
+                targetDuration: generatedStats.map { Double($0.targetDuration) },
+                longestSegmentDuration: generatedStats?.longestSegmentDuration,
+                servingMode: spec.servingMode
+            )
+            let shouldRaiseForwardBuffer = item.preferredForwardBufferDuration < target
+            let shouldEnableAutomaticWaiting = !avPlayer.automaticallyWaitsToMinimizeStalling
+            guard shouldRaiseForwardBuffer || shouldEnableAutomaticWaiting else { return }
+            if shouldRaiseForwardBuffer {
+                item.preferredForwardBufferDuration = target
+            }
+            avPlayer.automaticallyWaitsToMinimizeStalling = true
+            Self.logger.info(
+                "[CMP-AVP] loopback buffer ramp servingMode=\(String(describing: spec.servingMode), privacy: .public) forwardBuffer=\(target, privacy: .public)s automaticallyWaits=1 mediaBitrate=\(mediaBitrate ?? 0, privacy: .public)bps generatedBitrate=\(generatedStats?.rollingBitrateBps ?? 0, privacy: .public)bps declaredBitrate=\(spec.sourceBitrateBps ?? 0, privacy: .public)bps sourceReadBitrate=\(self.loopbackSourceDownloadBitrateBps ?? 0, privacy: .public)bps targetDuration=\(generatedStats?.targetDuration ?? 0, privacy: .public) longestSegment=\(generatedStats?.longestSegmentDuration ?? 0, privacy: .public)"
+            )
+        case .some(.remoteDirect), .none:
+            return
         }
-        avPlayer.automaticallyWaitsToMinimizeStalling = true
-        Self.logger.info(
-            "[CMP-AVP] loopback buffer ramp servingMode=\(String(describing: spec.servingMode), privacy: .public) forwardBuffer=\(target, privacy: .public)s automaticallyWaits=1 mediaBitrate=\(mediaBitrate ?? 0, privacy: .public)bps generatedBitrate=\(generatedStats?.rollingBitrateBps ?? 0, privacy: .public)bps declaredBitrate=\(spec.sourceBitrateBps ?? 0, privacy: .public)bps sourceReadBitrate=\(self.loopbackSourceDownloadBitrateBps ?? 0, privacy: .public)bps targetDuration=\(generatedStats?.targetDuration ?? 0, privacy: .public) longestSegment=\(generatedStats?.longestSegmentDuration ?? 0, privacy: .public)"
-        )
     }
 
     private var canRampLoopbackBufferToSteadyState: Bool {
