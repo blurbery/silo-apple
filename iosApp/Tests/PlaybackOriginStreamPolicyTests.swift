@@ -392,6 +392,38 @@ final class PlaybackOriginStreamPolicyTests: XCTestCase {
             )
         )
     }
+
+    func testStartupLeadLimitParksSpeculativeFillWithBudgetAvailable() {
+        let limit = PlaybackSourcePrefetchPolicy.loopbackStartupMaximumAheadBytes
+        XCTAssertTrue(
+            PlaybackOriginStreamPolicy.shouldPause(
+                writeCursor: limit,
+                demandMark: 0,
+                globalBudgetAvailable: true,
+                maximumAheadBytes: limit
+            )
+        )
+        XCTAssertFalse(
+            PlaybackOriginStreamPolicy.shouldPause(
+                writeCursor: limit - 1,
+                demandMark: 0,
+                globalBudgetAvailable: true,
+                maximumAheadBytes: limit
+            )
+        )
+    }
+
+    func testBlockedDemandOverridesStartupLeadLimit() {
+        let limit = PlaybackSourcePrefetchPolicy.loopbackStartupMaximumAheadBytes
+        XCTAssertFalse(
+            PlaybackOriginStreamPolicy.shouldPause(
+                writeCursor: limit,
+                demandMark: limit,
+                globalBudgetAvailable: false,
+                maximumAheadBytes: limit
+            )
+        )
+    }
 }
 
 final class PlaybackOriginReconnectPolicyTests: XCTestCase {

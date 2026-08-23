@@ -2,6 +2,22 @@ import XCTest
 @testable import Silo
 
 final class LoopbackBufferPolicyTests: XCTestCase {
+    func testRemoteHLSUsesOneSecondFastStartPolicy() {
+        let policy = AVPlayerBackend.startupBufferPolicy(
+            for: .remoteHLS(url: URL(string: "https://silo.invalid/master.m3u8")!, headers: [:])
+        )
+
+        XCTAssertEqual(policy, .fastStart(forwardBufferDuration: 1))
+    }
+
+    func testRemoteDirectKeepsSystemStartupBuffering() {
+        let policy = AVPlayerBackend.startupBufferPolicy(
+            for: .remoteDirect(url: URL(string: "https://silo.invalid/video.mp4")!, headers: [:])
+        )
+
+        XCTAssertEqual(policy, .systemDefault)
+    }
+
     func testEventGeneratedMediaBitrateDrivesSteadyStateBufferTarget() {
         let target = AVPlayerBackend.loopbackSteadyStateForwardBufferTarget(
             forBitsPerSecond: 69_000_000,

@@ -1490,6 +1490,10 @@ class PlayerViewModel {
                       callbackGeneration,
                       currentGeneration: self.streamLoadGeneration
                   ) else { return }
+            // SiloPlayer's MKV planner has finished its latency-sensitive
+            // startup probes and AVPlayer has advanced. Restore the full
+            // source-cache readahead window for steady-state resilience.
+            self.sourceProxy?.releaseStartupPrefetchLimit()
             Task { await self.sessionBridge.reportProtocolV3FirstFrame(milliseconds: milliseconds) }
         }
         cb.onError = { [weak self] message in
@@ -2807,7 +2811,10 @@ class PlayerViewModel {
                 }
             },
             resumeCapable: resumeCapable,
-            serverAdvertisesDirectStreamResume: serverAdvertisesDirectStreamResume
+            serverAdvertisesDirectStreamResume: serverAdvertisesDirectStreamResume,
+            startupPrefetchMaximumAheadBytes: plan.engine == .siloPlayerLoopback
+                ? PlaybackSourcePrefetchPolicy.loopbackStartupMaximumAheadBytes
+                : nil
         )
         do {
             try await proxy.start()
