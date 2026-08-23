@@ -45,6 +45,15 @@ enum TVSettingsOptions {
         )
     }
 
+    static let bufferAhead: [TVSettingsOption] =
+        BufferAheadMode.allCases.map { .init(id: $0.rawValue, label: $0.label) }
+
+    static let deinterlaceMode: [TVSettingsOption] =
+        DeinterlacePreference.allCases.map { .init(id: $0.rawValue, label: $0.label) }
+
+    static let deinterlaceFieldRate: [TVSettingsOption] =
+        DeinterlaceFieldRatePreference.allCases.map { .init(id: $0.rawValue, label: $0.label) }
+
     static let nextUpPrompt: [TVSettingsOption] = [
         .init(id: "0", label: "At end"),
         .init(id: "10", label: "10 seconds before end"),
@@ -538,6 +547,78 @@ struct TVSettingsConfirmationOverlay: View {
 
     private var buttonWidth: CGFloat {
         additionalDestructiveTitle == nil ? 260 : 320
+    }
+}
+
+// MARK: - Privacy policy handoff
+
+/// Apple TV has no general-purpose web browser, so HTTPS links have no system
+/// destination. Present the public policy URL as a QR handoff instead.
+struct TVPrivacyPolicyOverlay: View {
+    let dismiss: () -> Void
+
+    @FocusState private var isDoneFocused: Bool
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.76)
+                .ignoresSafeArea()
+
+            HStack(spacing: 54) {
+                QRCodeView(
+                    content: SiloLegalLinks.privacyPolicy.absoluteString,
+                    size: 320
+                )
+                .padding(22)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 24))
+                .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 22) {
+                    Image(systemName: "hand.raised.fill")
+                        .font(.system(size: 38, weight: .semibold))
+                        .foregroundStyle(Color.continuumAccent)
+                        .accessibilityHidden(true)
+
+                    Text("Privacy Policy")
+                        .font(.system(size: 42, weight: .bold))
+                        .foregroundStyle(Color.continuumOnSurface)
+
+                    Text("Scan this code with your phone or tablet to read Silo's privacy policy.")
+                        .font(.system(size: 23))
+                        .foregroundStyle(Color.continuumSecondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(SiloLegalLinks.privacyPolicy.absoluteString)
+                        .font(.system(size: 20, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Color.continuumAccent)
+                        .accessibilityLabel("Privacy policy URL")
+                        .accessibilityValue(SiloLegalLinks.privacyPolicy.absoluteString)
+
+                    Button(action: dismiss) {
+                        Text("Done")
+                            .font(.system(size: 24, weight: .semibold))
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .buttonStyle(TVSettingsPaneRowStyle())
+                    .focused($isDoneFocused)
+                }
+                .frame(width: 560, alignment: .leading)
+            }
+            .padding(.horizontal, 64)
+            .padding(.vertical, 52)
+            .background(
+                RoundedRectangle(cornerRadius: 32, style: .continuous)
+                    .fill(Color.continuumSurfaceElevated)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 32, style: .continuous)
+                    .strokeBorder(Color.continuumChromeRestingBorder, lineWidth: 1)
+            }
+            .focusSection()
+            .defaultFocus($isDoneFocused, true, priority: .userInitiated)
+        }
+        .onAppear { isDoneFocused = true }
+        .onExitCommand(perform: dismiss)
     }
 }
 

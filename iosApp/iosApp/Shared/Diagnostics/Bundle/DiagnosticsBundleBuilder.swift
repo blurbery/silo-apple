@@ -351,7 +351,8 @@ struct DiagnosticsBundleBuilder {
                 // hosted reports omit it and the collector can reject this
                 // otherwise ambiguous network-identity key globally.
                 guard normalizedKey != "virtualmemoryregioninfo",
-                      normalizedKey != "address" else { return }
+                      normalizedKey != "address",
+                      !hasHostedBareUUID(in: entry.key) else { return }
                 if normalizedKey == "binaryuuid",
                    let binaryUUID = entry.value as? String,
                    isHostedMetricKitBinaryUUID(binaryUUID) {
@@ -449,7 +450,8 @@ struct DiagnosticsBundleBuilder {
         case .object(let object):
             return .object(object.reduce(into: [:]) { result, entry in
                 let normalizedKey = entry.key.lowercased().filter { $0.isLetter || $0.isNumber }
-                guard !hostedDevicePrivateFieldKeys.contains(normalizedKey) else { return }
+                guard !hostedDevicePrivateFieldKeys.contains(normalizedKey),
+                      !hasHostedBareUUID(in: entry.key) else { return }
                 result[entry.key] = removeHostedDevicePrivateFields(from: entry.value)
             })
         default:
@@ -513,18 +515,124 @@ struct DiagnosticsBundleBuilder {
         let networkAssignmentsRemoved = sanitizeHostedNetworkIdentityAssignments(
             in: identifiersRemoved
         )
+        let numericMediaNormalized = replaceMatches(
+            of: hostedNumericMediaAssignmentRegex,
+            in: networkAssignmentsRemoved,
+            with: "mediaSeconds"
+        )
+        let numericTelemetryNormalized = normalizeHostedNumericTelemetryAssignments(
+            in: numericMediaNormalized
+        )
         let loopbackNormalized = replaceMatches(
             of: hostedLoopbackHostRegex,
-            in: networkAssignmentsRemoved,
+            in: numericTelemetryNormalized,
             with: "redacted.invalid"
         )
-        return templateHostedURLPaths(in: loopbackNormalized)
+        let ambiguousLegacyNumbersRemoved = sanitizeHostedAmbiguousLegacyNumericAssignments(
+            in: loopbackNormalized
+        )
+        return templateHostedURLPaths(in: ambiguousLegacyNumbersRemoved)
+    }
+
+    private static func sanitizeHostedAmbiguousLegacyNumericAssignments(
+        in value: String
+    ) -> String {
+        let source = value as NSString
+        let range = NSRange(location: 0, length: source.length)
+        let matches = hostedAmbiguousLegacyNumericAssignmentRegex.matches(
+            in: value,
+            options: [],
+            range: range
+        )
+        var rendered = value
+        for match in matches.reversed() {
+            let prefix = source.substring(with: match.range(at: 1))
+            let sign = source.substring(with: match.range(at: 2))
+            let token = source.substring(with: match.range(at: 3))
+            let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+            let isExactSafeClockAssignment =
+                sign.isEmpty &&
+                (prefix.lowercased() == "ac.cur=" || prefix.lowercased() == "ac.pts=") &&
+                (2...4).contains(parts.count) &&
+                parts.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
+            guard !isExactSafeClockAssignment,
+                  isHostedRejectedLegacyNumericToken(token) else { continue }
+            rendered = (rendered as NSString).replacingCharacters(
+                in: match.range,
+                with: "\(prefix)[redacted_network_identity]"
+            )
+        }
+        return rendered
+    }
+
+    /// Mirrors the collector's legacy IPv4 parsing and rejection boundary for
+    /// free-text numeric assignments. Public decimal multipart values remain
+    /// useful telemetry; explicit radix syntax, integer IPv4, and non-public
+    /// multipart values are ambiguous network identities and fail closed.
+    private static func isHostedRejectedLegacyNumericToken(_ token: String) -> Bool {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard (1...4).contains(parts.count) else { return false }
+        var numbers: [UInt64] = []
+        for component in parts {
+            guard !component.isEmpty, component.count <= 16 else { return false }
+            let lowercased = component.lowercased()
+            let radix: Int
+            let digits: String
+            if lowercased.hasPrefix("0x") {
+                radix = 16
+                digits = String(lowercased.dropFirst(2))
+                guard !digits.isEmpty,
+                      digits.allSatisfy({ $0.isHexDigit }) else { return false }
+            } else if component.count > 1, component.hasPrefix("0") {
+                radix = 8
+                digits = String(component.dropFirst())
+                guard digits.allSatisfy({ ("0"..."7").contains(String($0)) }) else {
+                    return false
+                }
+            } else {
+                radix = 10
+                digits = component
+                guard digits.allSatisfy(\.isNumber) else { return false }
+            }
+            guard let number = UInt64(digits.isEmpty ? "0" : digits, radix: radix),
+                  number <= UInt64(UInt32.max) else { return false }
+            numbers.append(number)
+        }
+        guard numbers.dropLast().allSatisfy({ $0 <= 255 }) else { return false }
+        let lastLimits: [UInt64] = [UInt64(UInt32.max), 0x00ff_ffff, 0x0000_ffff, 0xff]
+        guard let last = numbers.last, last <= lastLimits[parts.count - 1] else { return false }
+
+        let address = numbers.dropLast().enumerated().reduce(last) { result, entry in
+            result + (entry.element << UInt64(24 - (entry.offset * 8)))
+        }
+        let first = address >> 24
+        let second = (address >> 16) & 0xff
+        let isNonPublic = first == 0 || first == 10 ||
+            (first == 100 && (64...127).contains(second)) ||
+            first == 127 ||
+            (first == 169 && second == 254) ||
+            (first == 172 && (16...31).contains(second)) ||
+            (first == 192 && (second == 0 || second == 168)) ||
+            (first == 198 && (second == 18 || second == 19)) ||
+            first >= 224
+        let explicitLegacySyntax = parts.contains { component in
+            component.lowercased().hasPrefix("0x") ||
+                (component.count > 1 && component.hasPrefix("0"))
+        }
+        let longIntegerSyntax = parts.count == 1 &&
+            (7...10).contains(token.count) && token.allSatisfy(\.isNumber)
+        return explicitLegacySyntax || longIntegerSyntax || (parts.count > 1 && isNonPublic)
     }
 
     private static func sanitizeHostedBarePrivateIdentifiers(in value: String) -> String {
         var rendered = replaceMatches(
             of: hostedBareUUIDRegex,
             in: value,
+            with: "[redacted_private_id]"
+        )
+        rendered = replaceMatches(
+            of: hostedBareCompactUUIDRegex,
+            in: rendered,
             with: "[redacted_private_id]"
         )
         let source = rendered as NSString
@@ -541,6 +649,42 @@ struct DiagnosticsBundleBuilder {
             )
         }
         return rendered
+    }
+
+    private static func hasHostedBareUUID(in value: String) -> Bool {
+        let range = NSRange(location: 0, length: (value as NSString).length)
+        return hostedBareUUIDRegex.firstMatch(in: value, range: range) != nil
+            || hostedBareCompactUUIDRegex.firstMatch(in: value, range: range) != nil
+    }
+
+    private static func normalizeHostedNumericTelemetryAssignments(in value: String) -> String {
+        var rendered = value
+        for (regex, suffix) in hostedNumericTelemetryAssignmentRegexes {
+            let source = rendered as NSString
+            let range = NSRange(location: 0, length: source.length)
+            for match in regex.matches(in: rendered, range: range).reversed() {
+                guard match.numberOfRanges == 4 else { continue }
+                let key = source.substring(with: match.range(at: 1))
+                if key.caseInsensitiveCompare("bytes") == .orderedSame,
+                   isHostedByteRangeValue(in: source, before: match.range.location) {
+                    continue
+                }
+                let delimiter = source.substring(with: match.range(at: 2))
+                let numeric = source.substring(with: match.range(at: 3))
+                    .replacingOccurrences(of: ".", with: "p")
+                rendered = (rendered as NSString).replacingCharacters(
+                    in: match.range,
+                    with: key + delimiter + numeric + suffix
+                )
+            }
+        }
+        return rendered
+    }
+
+    private static func isHostedByteRangeValue(in source: NSString, before location: Int) -> Bool {
+        let prefix = source.substring(to: location)
+        let range = NSRange(location: 0, length: (prefix as NSString).length)
+        return hostedByteRangeAssignmentPrefixRegex.firstMatch(in: prefix, range: range) != nil
     }
 
     private static func redactHostedAbsolutePaths(in value: String) -> String {
@@ -604,21 +748,11 @@ struct DiagnosticsBundleBuilder {
         return rendered
     }
 
+    // The segment rules moved to DiagnosticsPathTemplate so networking can
+    // template `network.path` at emission time using the same regexes; these
+    // stay as the hosted-path spelling of that shared logic.
     private static func templateHostedPrivatePathSegments(_ value: String) -> String {
-        value.split(separator: "/", omittingEmptySubsequences: false)
-            .map { segment in
-                let candidate = String(segment)
-                return isHostedPrivatePathSegment(candidate) ? "{id}" : candidate
-            }
-            .joined(separator: "/")
-    }
-
-    private static func isHostedPrivatePathSegment(_ value: String) -> Bool {
-        let range = NSRange(location: 0, length: (value as NSString).length)
-        return hostedUUIDPathSegmentRegex.firstMatch(in: value, range: range) != nil
-            || hostedNumericPathSegmentRegex.firstMatch(in: value, range: range) != nil
-            || hostedHexPathSegmentRegex.firstMatch(in: value, range: range) != nil
-            || hostedOpaquePathSegmentRegex.firstMatch(in: value, range: range) != nil
+        DiagnosticsPathTemplate.template(value)
     }
 
     private static func replaceMatches(
@@ -675,20 +809,43 @@ struct DiagnosticsBundleBuilder {
     private static let hostedAuthorityURLRegex = try! NSRegularExpression(
         pattern: #"(?i)\b(?:https?|wss?)://[^\s<>\"']+"#
     )
-    private static let hostedUUIDPathSegmentRegex = try! NSRegularExpression(
-        pattern: #"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"#
-    )
-    private static let hostedNumericPathSegmentRegex = try! NSRegularExpression(
-        pattern: #"^[0-9]+$"#
-    )
-    private static let hostedHexPathSegmentRegex = try! NSRegularExpression(
-        pattern: #"(?i)^[0-9a-f]{16,}$"#
-    )
-    private static let hostedOpaquePathSegmentRegex = try! NSRegularExpression(
-        pattern: #"^[A-Za-z0-9_-]{20,}$"#
-    )
+    // The path-segment regexes (UUID / numeric / hex / opaque) live in
+    // DiagnosticsPathTemplate, shared with emission-time network templating.
     private static let hostedBareUUIDRegex = try! NSRegularExpression(
         pattern: #"(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"#
+    )
+    private static let hostedBareCompactUUIDRegex = try! NSRegularExpression(
+        pattern: #"(?i)(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])"#
+    )
+    private static let hostedNumericMediaAssignmentRegex = try! NSRegularExpression(
+        pattern: #"(?i)\bmedia(?=\s*[:=]\s*-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:$|[\s,;)\]}]))"#
+    )
+    private static let hostedNumericTelemetryAssignmentRegexes: [(NSRegularExpression, String)] = [
+        (try! NSRegularExpression(
+            pattern: #"(?i)\b(budgetBytes|bytes)(\s*[:=]\s*)(-?[0-9]+)(?![0-9A-Za-z.])"#
+        ), "B"),
+        (try! NSRegularExpression(
+            pattern: #"(?i)\b(elapsedMs)(\s*[:=]\s*)(-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+))(?![0-9A-Za-z.])"#
+        ), "ms"),
+        (try! NSRegularExpression(
+            pattern: #"(?i)\b(current|mediaSeconds|start|startTime)(\s*[:=]\s*)(-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+))(?![0-9A-Za-z.])"#
+        ), "s"),
+        (try! NSRegularExpression(
+            pattern: #"(?i)\b(rate)(\s*[:=]\s*)(-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+))(?![0-9A-Za-z.])"#
+        ), "x"),
+    ]
+    private static let hostedByteRangeAssignmentPrefixRegex = try! NSRegularExpression(
+        pattern: #"(?i)\brange\s*[:=]\s*$"#
+    )
+    private static let hostedAmbiguousLegacyNumericAssignmentRegex = try! NSRegularExpression(
+        // Playback telemetry such as `bufAhead=0.0` and
+        // `cachedAheadBytes=67108864` is indistinguishable from shortened,
+        // integer, octal, hexadecimal, or mixed-radix IPv4 syntax at the
+        // public collector. Preserve the explicitly unit-normalized keys
+        // above, but fail closed for every remaining numeric assignment,
+        // including quoted JSON-style fields, instead of maintaining an
+        // incomplete free-text key allowlist.
+        pattern: #"(?i)(?<![A-Za-z0-9_.-])((?:\"[A-Za-z][A-Za-z0-9_.-]{0,95}\"|'[A-Za-z][A-Za-z0-9_.-]{0,95}'|[A-Za-z][A-Za-z0-9_.-]{0,95})\s*[:=]\s*(?:[\"'])?)([-+]?)((?:(?:0x[0-9a-f]{1,16}|0[0-7]{1,15}|[0-9]{1,16})\.){1,3}(?:0x[0-9a-f]{1,16}|0[0-7]{1,15}|[0-9]{1,16})|0x[0-9a-f]{1,16}|0[0-7]+|[0-9]{7,10})(?![0-9A-Za-z.])"#
     )
     private static let hostedBarePrivateIdentifierRegex = try! NSRegularExpression(
         pattern: #"(?i)(?<![A-Za-z0-9])((?:ps|playback|session|file|item|media|plan|attempt|profile|account|user|device|content|library|request|req|correlation|server|subtitle|track|run)[_-](?:[0-9]+|[A-Za-z0-9][A-Za-z0-9_-]{7,}))(?![A-Za-z0-9_-])"#
@@ -736,7 +893,11 @@ struct DiagnosticsBundleBuilder {
         "bssid",
     ]
 
-    private enum HostedAttributeType {
+    // Internal rather than private so DiagnosticsAttributeRegistryParityTests can
+    // prove this allowlist is a subset of the canonical attribute registry. An
+    // entry here that the collectors do not register is a hard upload rejection,
+    // so the relationship has to be checked mechanically rather than by review.
+    enum HostedAttributeType: Equatable {
         case string
         case integer
 
@@ -750,10 +911,47 @@ struct DiagnosticsBundleBuilder {
         }
     }
 
-    // Vendored from silo-diagnostics/contract/v1/attr-registry.json. Keep this
-    // destination-specific: Apple's self-hosted registry has additional local
-    // playback attributes for compatibility with existing Silo servers.
-    private static let hostedAttributeRegistry: [
+    // A privacy allowlist for the hosted destination, not a second copy of the
+    // emission registry. Every key here must also appear in the canonical
+    // attribute registry (vendored at
+    // Tests/Fixtures/DiagnosticsContract/attr-registry.json) with the same type
+    // — the hosted collector rejects the whole bundle on an unregistered key.
+    // The reverse does not hold: canonical registers keys this table withholds.
+    // Self-hosted uploads carry the full canonical set; only hosted bundles are
+    // narrowed here.
+    //
+    // Two distinct reasons put a canonical key on the withheld list, and the
+    // distinction matters because they fail differently:
+    //
+    // 1. Content we do not want a third party to hold, regardless of whether it
+    //    would accept it. `playback.session_id`, `play_method`, `reason` and
+    //    `position_ms` describe one user's specific viewing session — a
+    //    server-issued identifier, operator free text, and a viewing position.
+    //    The collector would take them; we choose not to send them.
+    //
+    // 2. Keys that collide with the hosted collector's own `FORBIDDEN_KEYS`
+    //    privacy scanner (silo-diagnostics `src/privacy.ts`). A collision does
+    //    *not* reject the bundle — the report still processes to `ready`, but
+    //    the `privacy_fields` check fails and the report is permanently marked
+    //    `privacy_flagged` in the admin UI. `network.attempt` is exactly this:
+    //    canonical and harmless (a retry ordinal), but `attempt` is a scanner
+    //    forbidden key, so forwarding it would flag every hosted report from a
+    //    session containing a routine 401-token-refresh retry. Those flags are
+    //    all false positives, and false positives train operators to ignore the
+    //    one check that catches real leaks. The retry line's `msg` ("401 retry"
+    //    / "401 not retried") carries the distinction on its own, so hosted
+    //    evidence loses nothing by dropping the attribute.
+    //
+    // Before adding a key here, normalize it and check it against
+    // `FORBIDDEN_KEYS`, `FORBIDDEN_COMPACT_KEYS` and the credential/identifier
+    // segment rules in silo-diagnostics `src/privacy.ts` — a key is forbidden
+    // if it equals a forbidden key, contains one as an `_`-delimited segment,
+    // matches one with `_` stripped, or contains any `*_id`/`*_token`-style
+    // segment. See testHostedFrozenLogsAndBreadcrumbsDropPrivatePlaybackAttributes,
+    // testHostedAttributeAllowlistIsACanonicalSubset, and
+    // testHostedAllowlistWithholdsSessionIdentifyingAndCollectorForbiddenAttributes
+    // for the pinned sets.
+    static let hostedAttributeRegistry: [
         DiagnosticsLogCategory: [String: HostedAttributeType]
     ] = [
         .playback: [
@@ -776,9 +974,17 @@ struct DiagnosticsBundleBuilder {
             "path": .string,
             "status": .integer,
             "duration_ms": .integer,
+            "outcome": .string,
+            "error_code": .string,
+            // "attempt" is canonical, but withheld: see reason 2 above.
         ],
         .lifecycle: [
             "state": .string,
+            "phase": .string,
+            "duration_ms": .integer,
+            "outcome": .string,
+            "reason": .string,
+            "launch_type": .string,
         ],
         .crash: [
             "fingerprint": .string,

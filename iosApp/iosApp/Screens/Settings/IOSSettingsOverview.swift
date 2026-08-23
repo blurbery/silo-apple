@@ -251,6 +251,32 @@ struct IOSSettingsOverview: View {
                 value: versionString,
                 showsChevron: false
             )
+
+            SettingsOverviewDivider()
+
+            Link(destination: SiloLegalLinks.privacyPolicy) {
+                SettingsOverviewRow(
+                    title: "Privacy Policy",
+                    subtitle: "Learn how Silo handles your information",
+                    systemImage: "hand.raised.fill",
+                    tint: .teal
+                )
+            }
+            .buttonStyle(.plain)
+
+            SettingsOverviewDivider()
+
+            NavigationLink {
+                OpenSourceAcknowledgementsView()
+            } label: {
+                SettingsOverviewRow(
+                    title: "Open Source Licenses",
+                    subtitle: "Acknowledgements, licenses, and exact source revisions",
+                    systemImage: "curlybraces",
+                    tint: .indigo
+                )
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -358,7 +384,17 @@ struct IOSSettingsOverview: View {
     }
 
     private var matchesAboutSection: Bool {
-        matches("about", "version", versionString)
+        matches(
+            "about",
+            "version",
+            versionString,
+            "privacy",
+            "policy",
+            "information",
+            "open source",
+            "licenses",
+            "acknowledgements"
+        )
     }
 
     private var matchesSignOut: Bool {

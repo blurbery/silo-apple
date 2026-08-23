@@ -17,6 +17,7 @@ struct ContentView: View {
     #endif
     @State private var debugPlayContentId: String?
     @State private var didAttemptDebugAutoPlay = false
+    @State private var didAttemptDebugDiagnostics = false
     @State private var didStartInitialStateCheck = false
     @State private var didFinishStartupSplash = false
     @State private var pendingInitialAuthState: AppRouter.AuthState?
@@ -24,8 +25,7 @@ struct ContentView: View {
     @State private var diagnosticsModel = DiagnosticsViewModel()
     #endif
     /// Deep link URL received before the auth state was ready. Content links
-    /// drain on the next `.authenticated` transition; invitation links drain
-    /// immediately after startup commits its initial auth route.
+    /// drain on the next `.authenticated` transition.
     @State private var pendingDeepLink: URL?
     /// Shared with every screen that renders cards. Hydrates lazily on
     /// the first .authenticated transition so cards stay visible during
@@ -82,6 +82,13 @@ struct ContentView: View {
             handleDeepLink(url)
         }
         .onAppear {
+            #if os(iOS) || os(tvOS)
+            // The first frame SwiftUI actually produced. A launch whose
+            // breadcrumbs stop at `process_start` never got here, which
+            // separates a failure in static/scene setup from one in the
+            // startup work `authContent` drives below.
+            LaunchTimeline.recordRootViewAppeared()
+            #endif
             #if os(tvOS)
             ExitSentinel.shared.appDidEnterForeground()
             #endif
@@ -119,6 +126,27 @@ struct ContentView: View {
             guard router.authState == .authenticated else { return }
             Task { await diagnosticsModel.handleForeground() }
         }
+        // Memory pressure is the one launch/runtime failure the user perceives
+        // as "it just closed" and that leaves no other trace: the jetsam kill
+        // that usually follows produces no termination notification and no
+        // crash report the app can see. One warning-level breadcrumb followed
+        // by silence is the readable signature of that outcome.
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.didReceiveMemoryWarningNotification
+        )) { _ in
+            LaunchTimeline.recordMemoryWarning(state: Self.diagnosticsScenePhase(scenePhase))
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.willTerminateNotification
+        )) { _ in
+            // Recorded before ExitSentinel disarms so a clean shutdown is
+            // distinguishable from an abnormal exit at the same point in the
+            // timeline: the abnormal one simply lacks this line.
+            LaunchTimeline.recordTermination(state: Self.diagnosticsScenePhase(scenePhase))
+            #if os(tvOS)
+            ExitSentinel.shared.appWillTerminate()
+            #endif
+        }
         #endif
         #if os(tvOS)
         .onReceive(NotificationCenter.default.publisher(for: .temporaryRemoteAuthExpired)) { notification in
@@ -128,9 +156,6 @@ struct ContentView: View {
                 guard await TokenStore.shared.shouldConsumeSessionExpiryEvent(event) else { return }
                 TVControlReceiver.shared.temporaryAuthExpired(expected: event)
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willTerminateNotification)) { _ in
-            ExitSentinel.shared.appWillTerminate()
         }
         #endif
         #if os(macOS)
@@ -167,17 +192,19 @@ struct ContentView: View {
             #endif
             await maybeAutoPlayForDebug()
             if router.authState == .authenticated {
+                let hasPendingDeepLink = pendingDeepLink != nil
                 if let pending = pendingDeepLink {
                     pendingDeepLink = nil
                     handleDeepLink(pending)
                 }
                 #if os(tvOS)
+                restoreTrailerReturnIfNeeded(hasPriorityLaunchIntent: hasPendingDeepLink)
                 await ExitSentinel.shared.captureLeftoverIfNeeded()
                 #endif
                 #if os(iOS) || os(tvOS)
                 await diagnosticsModel.handleForeground()
                 #endif
-                await overlayPrefs.hydrateIfNeeded()
+                await hydrateOverlayPrefs(phase: "session_hydrate")
                 // Hydrate AI capabilities on a cold relaunch into a restored
                 // session — `selectProfile` only refreshes on a fresh sign-in,
                 // so without this the metadata-language / on-view-translate
@@ -195,6 +222,13 @@ struct ContentView: View {
                 #endif
             }
         }
+        #if DEBUG
+        #if os(iOS) || os(tvOS)
+        .task(id: router.authState) {
+            await maybeSendDiagnosticsForDebug()
+        }
+        #endif
+        #endif
         .task(id: serverRegistry.activeServerId) {
             // ServerRegistry publishes the destination ID while its identity
             // transition lease is still held. Wait before reading or
@@ -218,7 +252,12 @@ struct ContentView: View {
             Task { await AuthService.shared.refreshActiveServerName() }
             if router.authState == .authenticated {
                 await uiCustomization.refresh()
-                await overlayPrefs.hydrateIfNeeded()
+                // The one hydration whose outcome is never optional: `clear()`
+                // above guarantees a real fetch, so the wrapper's
+                // short-circuit case cannot apply here and a failure leaves
+                // every card — including the admin kill switch — on registry
+                // defaults for a server the user just switched to.
+                await hydrateOverlayPrefs(phase: "server_switch_hydrate")
                 #if os(iOS) || os(tvOS)
                 await diagnosticsModel.handleForeground()
                 #endif
@@ -237,12 +276,10 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             #if os(iOS) || os(tvOS)
-            DiagnosticsCoordinator.recordBreadcrumb(
-                category: .lifecycle,
-                tag: "Scene",
-                message: "scene phase changed",
-                attrs: ["state": .string(Self.diagnosticsScenePhase(newPhase))]
-            )
+            // Single funnel for every scene edge. `LaunchTimeline` decides the
+            // tier (`.inactive` is verbose noise; active/background are the
+            // timeline) and stamps the inter-phase `duration_ms`.
+            LaunchTimeline.recordScenePhase(Self.diagnosticsScenePhase(newPhase))
             #endif
             #if os(iOS)
             switch newPhase {
@@ -303,7 +340,7 @@ struct ContentView: View {
             #elseif os(iOS)
             Task { await diagnosticsModel.handleForeground() }
             #endif
-            Task { await overlayPrefs.hydrateIfNeeded() }
+            Task { await hydrateOverlayPrefs(phase: "foreground_refresh") }
             // Same rationale as overlay hydration above: a transiently-failed
             // capability probe (or one skipped on a cold restore) gets a
             // natural retry on foreground. `refresh()` is idempotent, so the
@@ -332,6 +369,44 @@ struct ContentView: View {
         .onChange(of: pictureInPicture.isEngaged) { _, _ in
             updateProfileAwayStartForBackgroundPlayback()
         }
+        #endif
+    }
+
+    /// Overlay hydration is the one post-authentication refresh whose failure
+    /// is silently sticky: `hydrateIfNeeded()` leaves `hasHydrated == false`
+    /// and every card renders from registry defaults — including the admin
+    /// kill switch — until a later foreground happens to succeed. Wrapping the
+    /// single funnel both call sites already share turns "my badges are wrong"
+    /// into a dated line with an outcome.
+    ///
+    /// The store swallows the error and exposes it as `lastError`, so the
+    /// reason is read back rather than caught. That text is server-authored, so
+    /// only its presence is logged, as a fixed token. A still-broken store
+    /// leaves `hasHydrated == false` and therefore re-fetches — and re-reports
+    /// a failure — on every foreground; that repetition is the intended signal
+    /// that overlays are persistently stale rather than transiently slow.
+    ///
+    /// Only the call that actually performed the fetch reports an outcome.
+    /// `hydrateIfNeeded()` short-circuits when the store is already hydrated or
+    /// a hydration is in flight — the cold-start case, where
+    /// `StartupContentPrefetcher.prefetchAuthenticatedContent()` starts an
+    /// unawaited hydration before this runs. In that window `lastError` has
+    /// already been cleared by the running `refresh()` and reads as success, so
+    /// reporting here would stamp a near-zero-duration success on a request
+    /// that may still fail. A missing line costs a reader nothing; a false
+    /// success actively misdirects the person debugging that cold start.
+    @MainActor
+    private func hydrateOverlayPrefs(phase: String) async {
+        #if os(iOS) || os(tvOS)
+        let mark = LaunchTimeline.mark()
+        guard await overlayPrefs.hydrateIfNeeded() else { return }
+        LaunchTimeline.recordRefreshOutcome(
+            phase: phase,
+            since: mark,
+            failureReason: overlayPrefs.lastError == nil ? nil : "overlay_prefs_unavailable"
+        )
+        #else
+        await overlayPrefs.hydrateIfNeeded()
         #endif
     }
 
@@ -447,12 +522,18 @@ struct ContentView: View {
         switch router.authState {
         case .loading:
             StartupSplashView {
+                #if os(iOS) || os(tvOS)
+                LaunchTimeline.recordSplashFinished()
+                #endif
                 didFinishStartupSplash = true
                 finishInitialStartupIfReady()
             }
             .task {
                 guard !didStartInitialStateCheck else { return }
                 didStartInitialStateCheck = true
+                #if os(iOS) || os(tvOS)
+                LaunchTimeline.recordInitialStateCheckStarted()
+                #endif
                 await checkInitialState()
             }
 
@@ -512,26 +593,6 @@ struct ContentView: View {
     /// If the auth state isn't ready yet, the link is queued in
     /// `pendingDeepLink` until startup commits its initial route.
     private func handleDeepLink(_ url: URL) {
-        if let invitation = InvitationClaimLink(url: url) {
-            #if os(tvOS)
-            // Invitation claiming is not implemented on tvOS. Ignore the
-            // route without disturbing an existing authenticated session.
-            return
-            #else
-            // The startup task owns auth-state routing while `.loading`.
-            // Defer this invite until that task commits so its older result
-            // cannot overwrite the claim route on a cold launch.
-            guard router.authState != .loading else {
-                pendingDeepLink = url
-                return
-            }
-            router.path = NavigationPath()
-            router.authState = .needsLogin
-            router.navigate(to: .inviteClaim(endpoint: invitation.endpoint, token: invitation.token))
-            return
-            #endif
-        }
-
         guard url.scheme?.lowercased() == "continuum",
               let host = url.host?.lowercased() else { return }
 
@@ -581,6 +642,21 @@ struct ContentView: View {
             break
         }
     }
+
+    #if os(tvOS)
+    /// Consumes a fresh trailer handoff as soon as authentication resolves,
+    /// before unrelated startup hydration can delay navigation. A queued deep
+    /// link remains the priority launch intent, but the trailer record is still
+    /// consumed so it cannot ghost-navigate a later launch.
+    private func restoreTrailerReturnIfNeeded(hasPriorityLaunchIntent: Bool) {
+        guard let contentId = TVTrailerReturnStore.shared.consumeColdLaunchRestore(),
+              !hasPriorityLaunchIntent,
+              router.path.isEmpty else {
+            return
+        }
+        router.navigate(to: .itemDetail(contentId: contentId))
+    }
+    #endif
 
     @MainActor
     private func routePlayDeepLink(contentId: String) async {
@@ -637,6 +713,14 @@ struct ContentView: View {
                 : .needsProfile
         }
 
+        #if os(iOS) || os(tvOS)
+        // The single most useful launch line: everything above it is Keychain
+        // and profile resolution, everything below is the routed app. A cold
+        // launch that stalls here (no server reachable, a wedged Keychain read)
+        // shows as a long gap before this phase and nothing after it.
+        LaunchTimeline.recordInitialStateResolved(state: targetState.diagnosticsState)
+        #endif
+
         StartupContentPrefetcher.prefetchForInitialRoute(targetState)
         pendingInitialAuthState = targetState
         finishInitialStartupIfReady()
@@ -649,14 +733,14 @@ struct ContentView: View {
     private func finishInitialStartupIfReady() {
         guard didFinishStartupSplash, let targetState = pendingInitialAuthState else { return }
         pendingInitialAuthState = nil
-        router.authState = targetState
-        #if !os(tvOS)
-        if let pendingDeepLink,
-           InvitationClaimLink(url: pendingDeepLink) != nil {
-            self.pendingDeepLink = nil
-            handleDeepLink(pendingDeepLink)
-        }
+        #if os(iOS) || os(tvOS)
+        // Closes the cold-launch chain. Both gates (splash animation and state
+        // resolution) have cleared, so this is the moment the user first sees
+        // real content. `AppRouter` logs the auth transition itself; this line
+        // records that launch reached a terminal, usable state at all.
+        LaunchTimeline.recordFirstContent(state: targetState.diagnosticsState)
         #endif
+        router.authState = targetState
     }
 
     #if DEBUG
@@ -727,15 +811,46 @@ struct ContentView: View {
         return CommandLine.arguments[index + 1].trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Debug: sign in from launch arguments
-    /// `-debugServer <url> -debugUsername <user> -debugPassword <pass>`,
-    /// selecting the primary (or only) PIN-less profile. Simulator-driven
-    /// end-to-end runs use this to reach `.authenticated` without UI input.
+    #if os(iOS) || os(tvOS)
+    /// Debug-only physical-device hook for exercising the complete hosted
+    /// diagnostics path after launch-driven playback has had time to start.
+    /// The argument value is a bounded delay in seconds; no report is sent
+    /// unless the tester explicitly supplies it.
+    private func maybeSendDiagnosticsForDebug() async {
+        guard router.authState == .authenticated,
+              !didAttemptDebugDiagnostics,
+              let rawDelay = debugLaunchArgValue("-debugSendDiagnosticsAfter"),
+              let requestedDelay = UInt64(rawDelay) else {
+            return
+        }
+        didAttemptDebugDiagnostics = true
+
+        let delay = min(requestedDelay, 300)
+        try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+        guard !Task.isCancelled, router.authState == .authenticated else { return }
+
+        if CommandLine.arguments.contains("-debugDiagnosticsHosted"),
+           diagnosticsModel.selectedDestination != .hosted {
+            await diagnosticsModel.setDestination(.hosted)
+        }
+        await diagnosticsModel.handleForeground()
+        await diagnosticsModel.createAndSendManualReport()
+        print("[DebugDiagnostics] \(diagnosticsModel.notice?.message ?? "No upload result.")")
+    }
+    #endif
+
+    /// Debug: sign in from launch arguments, with the password accepted from
+    /// `SILO_DEBUG_PASSWORD` so physical-device runs do not expose it in the
+    /// process arguments. Simulator fixtures may still pass `-debugPassword`.
+    /// Selects the primary (or only) PIN-less profile.
     private func maybeDebugAutoLogin() async {
+        let password = debugLaunchArgValue("-debugPassword")
+            ?? ProcessInfo.processInfo.environment["SILO_DEBUG_PASSWORD"]
         guard router.authState != .authenticated,
               let server = debugLaunchArgValue("-debugServer"),
               let username = debugLaunchArgValue("-debugUsername"),
-              let password = debugLaunchArgValue("-debugPassword") else {
+              let password,
+              !password.isEmpty else {
             return
         }
         do {
@@ -813,24 +928,9 @@ struct ContentView: View {
         switch route {
         case .serverNeedsSetup:
             #if os(tvOS)
-            EmptyStateView(icon: "gearshape.2", title: "Finish setup in your browser", subtitle: nil)
-                .continuumBackground()
+            TVServerNeedsSetupView(router: router)
             #else
             ServerNeedsSetupView(router: router)
-            #endif
-        case .signup:
-            #if os(tvOS)
-            EmptyStateView(icon: "person.badge.plus", title: "Sign up from a phone or the web", subtitle: nil)
-                .continuumBackground()
-            #else
-            SignupView(router: router)
-            #endif
-        case .inviteClaim(let endpoint, let token):
-            #if os(tvOS)
-            EmptyStateView(icon: "envelope.badge.person.crop", title: "Open your invite on a phone or the web", subtitle: nil)
-                .continuumBackground()
-            #else
-            InviteClaimView(router: router, endpoint: endpoint, token: token)
             #endif
         case .onboardingTour:
             #if os(tvOS)
@@ -883,17 +983,9 @@ struct ContentView: View {
             #endif
         case .serverNeedsSetup:
             #if os(tvOS)
-            EmptyStateView(icon: "gearshape.2", title: "Finish setup in your browser", subtitle: nil)
-                .continuumBackground()
+            TVServerNeedsSetupView(router: router)
             #else
             ServerNeedsSetupView(router: router)
-            #endif
-        case .signup:
-            #if os(tvOS)
-            EmptyStateView(icon: "person.badge.plus", title: "Sign up from a phone or the web", subtitle: nil)
-                .continuumBackground()
-            #else
-            SignupView(router: router)
             #endif
         default:
             EmptyStateView(icon: "questionmark.circle", title: "Unknown", subtitle: nil)
@@ -1733,6 +1825,15 @@ struct MainTabView: View {
                 posterURLHint: payload.posterURL,
                 backdropURLHint: payload.backdropURL
             )
+            #if os(iOS)
+            // Recorded here rather than rebuilt inside the player: a Picture in
+            // Picture restore has to re-present this exact payload, and
+            // `PlayerView` never receives `returnToContentId`.
+            .onAppear {
+                PlayerPresentationRestoration.presenter = router
+                PlayerPresentationRestoration.recordPresentation(payload)
+            }
+            #endif
         }
         #if os(iOS)
         .sheet(isPresented: Binding(
@@ -2226,8 +2327,6 @@ struct MainTabView: View {
             RequestDetailView(mediaType: mediaType, tmdbId: tmdbId)
         case .myRequests:
             MyRequestsView()
-        case .admin:
-            AdminDashboardView()
         case .search:
             SearchView()
         case .settings:

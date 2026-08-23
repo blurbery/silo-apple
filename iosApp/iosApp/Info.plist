@@ -38,7 +38,6 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>continuum</string>
-				<string>silo</string>
 			</array>
 		</dict>
 	</array>
@@ -64,6 +63,8 @@
 		<string>_silopair._tcp</string>
 		<string>_silocast._tcp</string>
 	</array>
+	<key>SiloBuildChannel</key>
+	<string>$(SILO_BUILD_CHANNEL)</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>
@@ -76,7 +77,7 @@
 	<dict/>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
-		<string>armv7</string>
+		<string>arm64</string>
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>

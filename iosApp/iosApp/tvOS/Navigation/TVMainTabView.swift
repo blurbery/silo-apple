@@ -1164,6 +1164,10 @@ struct TVMainTabView: View {
 
     private func refreshAuthState() {
         router.popToRoot()
+        // A server switch can land back on `.authenticated`, which the
+        // router's same-value guard drops — so the identity boundary for an
+        // engaged PiP video is enforced here, before the reassignment.
+        PlayerIdentityBoundary.endEngagedVideoPictureInPicture()
         let auth = AuthService.shared
         if !auth.hasServer {
             router.authState = .needsServerSetup
@@ -1225,8 +1229,6 @@ struct TVMainTabView: View {
             RequestDetailView(mediaType: mediaType, tmdbId: tmdbId)
         case .myRequests:
             MyRequestsView()
-        case .admin:
-            AdminDashboardView()
         case .search:
             SearchView(usesTVTopMenuInset: false)
         case .settings:

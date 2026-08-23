@@ -76,12 +76,14 @@ final class AuthService: @unchecked Sendable {
         // defaults or credential slot. This prevents candidate discovery from
         // exposing a global A/B routing mixture to unrelated requests.
         let fetchedName = await serverIdentityResolver.fetchServerName(serverURL: normalized)
+        try Task.checkCancellation()
 
         // Commit only after the candidate proves it can serve setup status.
         let status: SetupStatus = try await HTTPClient.shared.getUnauthenticated(
             serverURL: normalized,
             path: "/api/v1/auth/setup"
         )
+        try Task.checkCancellation()
 
         // Success: upsert the registry entry and make it active.
         let entry = ServerEntry(
@@ -131,96 +133,6 @@ final class AuthService: @unchecked Sendable {
             refreshToken: response.refreshToken,
             expectedAccount: expectedAccount
         )
-    }
-
-    func setupAdmin(username: String, email: String, password: String) async throws {
-        guard let expectedAccount = await TokenStore.shared.refreshAccountIdentity() else {
-            throw HTTPError.serverUrlNotConfigured
-        }
-        let response: LoginResponse = try await HTTPClient.shared.post(
-            "/api/v1/auth/setup",
-            body: SetupRequest(username: username, email: email, password: password)
-        )
-        try await installSession(
-            accessToken: response.accessToken,
-            refreshToken: response.refreshToken,
-            expectedAccount: expectedAccount
-        )
-    }
-
-    func signup(username: String, email: String, password: String, inviteCode: String) async throws {
-        guard let expectedAccount = await TokenStore.shared.refreshAccountIdentity() else {
-            throw HTTPError.serverUrlNotConfigured
-        }
-        let response: LoginResponse = try await HTTPClient.shared.post(
-            "/api/v1/auth/signup",
-            body: SignupRequest(
-                username: username,
-                email: email,
-                password: password,
-                inviteCode: inviteCode
-            )
-        )
-        try await installSession(
-            accessToken: response.accessToken,
-            refreshToken: response.refreshToken,
-            expectedAccount: expectedAccount
-        )
-    }
-
-    // MARK: - Emailed invitations
-
-    /// Resolve an invite against its validated endpoint without changing the
-    /// active server or attaching credentials from an existing session.
-    func lookupInvitation(endpoint: ServerEndpoint, token: String) async throws -> InvitationLookupResponse {
-        try await HTTPClient.shared.getAnonymous(
-            from: endpoint,
-            "/api/v1/invitations/\(token)",
-            diagnosticPath: "/api/v1/invitations/<redacted>"
-        )
-    }
-
-    /// Accepts an invitation: the account is created server-side with the
-    /// invitation's email as username, and a normal session begins. The
-    /// server entry is registered so the session survives restarts.
-    func acceptInvitation(endpoint: ServerEndpoint, token: String, password: String) async throws -> String {
-        let id = ServerRegistry.serverId(for: endpoint.baseURL)
-        var fetchedName: String?
-        if let health: HealthStatus = try? await HTTPClient.shared.getAnonymous(
-            from: endpoint,
-            "/api/v1/health"
-        ) {
-            fetchedName = health.serverName
-        }
-        let response: LoginResponse = try await HTTPClient.shared.postAnonymous(
-            to: endpoint,
-            "/api/v1/invitations/\(token)/accept",
-            body: AcceptInvitationRequest(password: password),
-            diagnosticPath: "/api/v1/invitations/<redacted>/accept"
-        )
-
-        // Only a successful accept commits the server/session boundary.
-        guard ServerRegistry.shared.addOrUpdate(ServerEntry(
-            id: id,
-            url: endpoint.baseURL,
-            fetchedName: fetchedName,
-            profileId: nil,
-            lastUsedAt: Date()
-        ), preservingProfile: false) != nil else {
-            throw ServerRegistryError.persistenceFailed
-        }
-        guard await ServerRegistry.shared.switchTo(serverId: id) else {
-            throw ServerRegistryError.persistenceFailed
-        }
-        guard let expectedAccount = await TokenStore.shared.refreshAccountIdentity() else {
-            throw HTTPError.serverUrlNotConfigured
-        }
-        try await installSession(
-            accessToken: response.accessToken,
-            refreshToken: response.refreshToken,
-            expectedAccount: expectedAccount
-        )
-        return String(response.user.id)
     }
 
     /// A login response establishes a brand-new session. Wipe every piece of
@@ -361,7 +273,12 @@ final class AuthService: @unchecked Sendable {
             let committed = await TokenStore.shared.deactivateProfile(
                 expectedAccount: expectedAccount
             )
-            if committed { await clearPerProfileCaches() }
+            if committed {
+                // A cold trailer return may require the profile picker. Keep
+                // the record until the selected identity can validate it;
+                // explicit in-app profile changes clear it before this path.
+                await clearPerProfileCaches(preservingTrailerReturn: true)
+            }
             return false
 
         case .restore(let remembered):
@@ -379,7 +296,10 @@ final class AuthService: @unchecked Sendable {
                     await clearPerProfileCaches()
                     return false
                 }
-                await clearPerProfileCaches()
+                // This is launch restoration of the same remembered identity,
+                // not a profile boundary. Keep a matching trailer handoff
+                // alive until ContentView can consume it after authentication.
+                await clearPerProfileCaches(preservingTrailerReturn: true)
                 return true
             } else {
                 _ = await TokenStore.shared.deactivateProfile(
@@ -507,7 +427,11 @@ final class AuthService: @unchecked Sendable {
                 throw ProfileTransitionError.accountEpochUnavailable
             }
         }
-        await clearPerProfileCaches()
+        // Preserve a cold trailer return through the picker. Once the router
+        // becomes authenticated, ContentView consumes it and the identity
+        // policy either restores the matching page or rejects the record.
+        // Explicit profile switches already clear it during deactivation.
+        await clearPerProfileCaches(preservingTrailerReturn: true)
         await HTTPClient.shared.endIdentityTransition(transitionLease)
         #if os(iOS) || os(tvOS)
         DiagnosticsCoordinator.activeProfileDidChange()
@@ -575,11 +499,11 @@ final class AuthService: @unchecked Sendable {
         }
     }
 
-    /// Drop every cached response that's profile-scoped. Called on
-    /// profile switch and sign-out so userData (watched, favorites,
+    /// Drop every cached response that's profile-scoped. Called while
+    /// restoring or changing profile identity so userData (watched, favorites,
     /// watchlist, home recommendations) doesn't leak between accounts.
     @MainActor
-    private func clearPerProfileCaches() {
+    private func clearPerProfileCaches(preservingTrailerReturn: Bool = false) {
         StartupContentPrefetcher.resetProfileScopedPrefetches()
         for prefix in CacheKey.perProfilePrefixes {
             ResponseCache.shared.removeAll(withPrefix: prefix)
@@ -605,6 +529,12 @@ final class AuthService: @unchecked Sendable {
         RequestsEventBus.shared.reset()
         #if os(tvOS)
         ItemDetailCache.shared.clearAll()
+        if !preservingTrailerReturn {
+            // The identity check in TrailerReturnPolicy already refuses a record
+            // across identities; deleting here keeps the outgoing identity's
+            // browsing out of plaintext defaults on a shared device.
+            TVTrailerReturnStore.shared.clear()
+        }
         #endif
     }
 
@@ -767,6 +697,10 @@ final class AuthService: @unchecked Sendable {
         RequestsEventBus.shared.reset()
         #if os(tvOS)
         ItemDetailCache.shared.clearAll()
+        // The identity check in TrailerReturnPolicy already refuses a record
+        // across identities; deleting here keeps the outgoing identity's
+        // browsing out of plaintext defaults on a shared device.
+        TVTrailerReturnStore.shared.clear()
         #endif
     }
 
