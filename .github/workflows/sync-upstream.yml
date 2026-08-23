@@ -1,0 +1,128 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: Silo-Server/silo-apple
+  UPSTREAM_BRANCH: main
+  ALERT_TITLE: Automated upstream sync needs attention
+  XCODEGEN_VERSION: "2.43.0"
+
+jobs:
+  sync:
+    name: Merge, validate, and update main
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the fork main branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream on a temporary branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "blurbery"
+          git config user.email "blurbery@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" HEAD; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Fork main already contains the latest upstream commit."
+            exit 0
+          fi
+
+          git switch -c "automation/upstream-sync-${GITHUB_RUN_ID}"
+          git merge --no-ff --no-edit "upstream/${UPSTREAM_BRANCH}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned XcodeGen
+        if: steps.merge.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen-dist"
+          sudo "$RUNNER_TEMP/xcodegen-dist/xcodegen/install.sh" /usr/local
+          xcodegen --version
+
+      - name: Generate the Xcode project
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: iosApp
+        run: xcodegen generate
+
+      - name: Build iOS without signing
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: iosApp
+        run: |
+          xcodebuild build \
+            -project Silo.xcodeproj \
+            -scheme Silo \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-iOS" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build tvOS without signing
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: iosApp
+        run: |
+          xcodebuild build \
+            -project Silo.xcodeproj \
+            -scheme SiloTV \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-tvOS" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Advance fork main after validation
+        if: steps.merge.outputs.changed == 'true'
+        run: git push origin HEAD:main
+
+      - name: Open one alert when sync fails
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_number="$(gh issue list --state open --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == env.ALERT_TITLE) | .number" \
+            | head -n 1)"
+          if [[ -z "$issue_number" ]]; then
+            gh issue create \
+              --title "$ALERT_TITLE" \
+              --body "The scheduled merge from \`$UPSTREAM_REPOSITORY:$UPSTREAM_BRANCH\` failed. The fork's \`main\` branch was left unchanged. Review: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
+
+      - name: Close a resolved sync alert
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          issue_number="$(gh issue list --state open --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == env.ALERT_TITLE) | .number" \
+            | head -n 1)"
+          if [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --comment "The automatic upstream sync is healthy again."
+          fi
