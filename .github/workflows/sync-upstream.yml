@@ -50,6 +50,21 @@ jobs:
           git merge --no-ff --no-edit "upstream/${UPSTREAM_BRANCH}"
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
+      - name: Keep the scheduled workflow active
+        if: steps.merge.outputs.changed == 'false'
+        shell: bash
+        run: |
+          set -euo pipefail
+          last_commit_epoch="$(git log -1 --format=%ct)"
+          current_epoch="$(date +%s)"
+          keepalive_after_seconds=$((45 * 24 * 60 * 60))
+          if (( current_epoch - last_commit_epoch < keepalive_after_seconds )); then
+            echo "Repository activity is recent; no keepalive commit is needed."
+            exit 0
+          fi
+          git commit --allow-empty -m "chore: keep upstream sync active"
+          git push origin HEAD:main
+
       - name: Install pinned XcodeGen
         if: steps.merge.outputs.changed == 'true'
         shell: bash
