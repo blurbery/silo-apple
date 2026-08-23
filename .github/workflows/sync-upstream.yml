@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 concurrency:
   group: sync-upstream-main
@@ -16,7 +15,6 @@ concurrency:
 env:
   UPSTREAM_REPOSITORY: Silo-Server/silo-apple
   UPSTREAM_BRANCH: main
-  ALERT_TITLE: Automated upstream sync needs attention
   XCODEGEN_VERSION: "2.43.0"
 
 jobs:
@@ -63,6 +61,10 @@ jobs:
           sudo "$RUNNER_TEMP/xcodegen-dist/xcodegen/install.sh" /usr/local
           xcodegen --version
 
+      - name: Select Xcode 26
+        if: steps.merge.outputs.changed == 'true'
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+
       - name: Generate the Xcode project
         if: steps.merge.outputs.changed == 'true'
         working-directory: iosApp
@@ -94,35 +96,12 @@ jobs:
         if: steps.merge.outputs.changed == 'true'
         run: git push origin HEAD:main
 
-      - name: Open one alert when sync fails
+      - name: Summarize a failed sync
         if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          set -euo pipefail
-          issue_number="$(gh issue list --state open --limit 100 \
-            --json number,title \
-            --jq ".[] | select(.title == env.ALERT_TITLE) | .number" \
-            | head -n 1)"
-          if [[ -z "$issue_number" ]]; then
-            gh issue create \
-              --title "$ALERT_TITLE" \
-              --body "The scheduled merge from \`$UPSTREAM_REPOSITORY:$UPSTREAM_BRANCH\` failed. The fork's \`main\` branch was left unchanged. Review: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          fi
-
-      - name: Close a resolved sync alert
-        if: success()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          issue_number="$(gh issue list --state open --limit 100 \
-            --json number,title \
-            --jq ".[] | select(.title == env.ALERT_TITLE) | .number" \
-            | head -n 1)"
-          if [[ -n "$issue_number" ]]; then
-            gh issue close "$issue_number" \
-              --comment "The automatic upstream sync is healthy again."
-          fi
+          {
+            echo "## Upstream sync failed"
+            echo
+            echo "The fork's main branch was left unchanged. Review the failed step in this run."
+          } >> "$GITHUB_STEP_SUMMARY"
