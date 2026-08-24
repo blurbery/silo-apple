@@ -2293,7 +2293,11 @@ class PlayerViewModel {
     ) async throws {
         try requireCurrentStreamLoad(expectedStreamLoadGeneration)
         let preferredSubtitles = subtitleOrderingLanguage.map { [$0] } ?? []
-        let preferredAudio = settings.audioLanguage.isEmpty ? [] : [settings.audioLanguage]
+        let preferredAudio = AetherInitialAudioPreference.languages(
+            selectedOrdinal: prepared.protocolV3?.plan.selectedTracks.audio?.index,
+            tracks: prepared.selectedVersion.audioTracks ?? [],
+            fallbackLanguage: settings.audioLanguage
+        )
         // The explicit Buffer Ahead choice wins; `automatic` has no count of
         // its own and keeps the historical mapping from the synced Seek Cache
         // toggle, so a device that never touches this picker behaves exactly as
@@ -2979,8 +2983,12 @@ class PlayerViewModel {
             return
         }
         let handlers = AetherVideoNowPlayingCoordinator.Handlers(
-            play:        { [weak self] in self?.aetherPlaybackController.play() },
-            pause:       { [weak self] in self?.aetherPlaybackController.pause() },
+            // On tvOS the physical Play/Pause button can arrive through the
+            // player-scoped media command center instead of SwiftUI's
+            // `onPlayPauseCommand`. Keep that route visually consistent with
+            // Select by revealing the transport controls as playback changes.
+            play:        { [weak self] in self?.handleNowPlayingPlay() },
+            pause:       { [weak self] in self?.handleNowPlayingPause() },
             isPaused:    { [weak self] in
                 guard let self else { return true }
                 return self.hasReachedEndOfFile || self.aetherPlaybackController.isPaused
@@ -3006,6 +3014,20 @@ class PlayerViewModel {
             useSharedFallback: aetherPlaybackController.shouldUseSharedVideoNowPlayingFallback,
             handlers: handlers
         )
+        #endif
+    }
+
+    private func handleNowPlayingPlay() {
+        aetherPlaybackController.play()
+        #if os(tvOS)
+        scheduleHideControls()
+        #endif
+    }
+
+    private func handleNowPlayingPause() {
+        aetherPlaybackController.pause()
+        #if os(tvOS)
+        scheduleHideControls()
         #endif
     }
 
