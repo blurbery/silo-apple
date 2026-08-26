@@ -123,6 +123,19 @@ struct ContentView: View {
             ) else { return }
             router.showProfileSelection()
         }
+        .onChange(of: serverRegistry.activeServerId) { previousServerID, activeServerID in
+            guard previousServerID != activeServerID,
+                  router.authState == .needsServerSetup,
+                  shouldPresentProfileSelectionAfterRecovery(
+                      isLoggedIn: AuthService.shared.isLoggedIn,
+                      activeProfileID: AuthService.shared.profileId
+                  ) else { return }
+            // Companion setup adds the server and account atomically. The
+            // active-server change intentionally re-keys `authContent`, which
+            // otherwise replaces the receiver's success screen with a fresh
+            // setup view before its delayed navigation can run.
+            router.showProfileSelection()
+        }
         #if os(iOS) || os(tvOS)
         .onReceive(NotificationCenter.default.publisher(for: .diagnosticsPendingReportCreated)) { _ in
             guard router.authState == .authenticated else { return }
@@ -213,6 +226,10 @@ struct ContentView: View {
                 // features stay hidden until a profile switch. Idempotent and
                 // failure-tolerant, so double-calling with `selectProfile` is safe.
                 await AICapabilities.shared.refresh()
+                // Same cold-relaunch reasoning: without this, a restored
+                // session on tvOS would request default-size images until
+                // the next profile switch.
+                await ImageSizeCapability.shared.refresh()
                 await RequestsFeatureStore.shared.refresh()
                 await SubtitleProvidersStore.shared.refresh()
                 await uiCustomization.refresh()
@@ -348,6 +365,7 @@ struct ContentView: View {
             // natural retry on foreground. `refresh()` is idempotent, so the
             // happy path costs nothing.
             Task { await AICapabilities.shared.refresh() }
+            Task { await ImageSizeCapability.shared.refresh() }
             Task { await RequestsFeatureStore.shared.refresh() }
             Task { await SubtitleProvidersStore.shared.refresh() }
             Task { await uiCustomization.refresh() }
