@@ -37,7 +37,11 @@ final class ImageSizeCapabilityTests: XCTestCase {
         "logo": {"small": 300, "medium": 500, "large": 1280},
         "backdrop": {"small": 300, "medium": 780, "large": 1920}
       },
-      "original_max_width_px": 1920
+      "original_max_width_px": 1920,
+      "textless_poster": {
+        "endpoint": "/api/v1/catalog/items/{id}/images/textless-poster",
+        "supported_types": ["movie", "series"]
+      }
     }
     """
 
@@ -59,6 +63,11 @@ final class ImageSizeCapabilityTests: XCTestCase {
         XCTAssertEqual(capability.widths["poster"]?["large"], 780)
         XCTAssertEqual(capability.widths["logo"]?["large"], 1280)
         XCTAssertEqual(capability.widths["backdrop"]?["large"], 1920)
+        XCTAssertEqual(
+            capability.textlessPoster?.endpoint,
+            "/api/v1/catalog/items/{id}/images/textless-poster"
+        )
+        XCTAssertEqual(capability.textlessPoster?.supportedTypes, ["movie", "series"])
     }
 
     /// Roles the client doesn't know about must not fail the decode —
@@ -78,6 +87,24 @@ final class ImageSizeCapabilityTests: XCTestCase {
             from: Data(json.utf8)
         )
         XCTAssertEqual(capability.widths["thumb"]?["large"], 480)
+    }
+
+    func testTextlessPosterEndpointOnlySupportsAdvertisedContentTypes() throws {
+        let capability = try decodedCapability()
+        XCTAssertEqual(
+            ImageSizeCapability.textlessPosterEndpoint(capability: capability, for: "movie"),
+            "/api/v1/catalog/items/{id}/images/textless-poster"
+        )
+        XCTAssertEqual(
+            ImageSizeCapability.textlessPosterEndpoint(capability: capability, for: "SERIES"),
+            "/api/v1/catalog/items/{id}/images/textless-poster"
+        )
+        XCTAssertNil(
+            ImageSizeCapability.textlessPosterEndpoint(capability: capability, for: "episode")
+        )
+        XCTAssertNil(
+            ImageSizeCapability.textlessPosterEndpoint(capability: capability, for: "audiobook")
+        )
     }
 
     // MARK: - Query injection
@@ -190,7 +217,7 @@ final class ImageSizeCapabilityTests: XCTestCase {
         XCTAssertEqual(capability.requestQuery, ["image_size": "large"])
     }
 
-    func testFailedRefreshRetriesAndThenCachesSuccess() async throws {
+    func testFailedRefreshIsCachedUntilExplicitRetry() async throws {
         let response = try decodedCapability()
         let stub = ImageSizeCapabilityFetchStub(
             response: response,
@@ -204,9 +231,13 @@ final class ImageSizeCapabilityTests: XCTestCase {
         XCTAssertTrue(capability.requestQuery.isEmpty)
 
         await capability.refresh()
+        var callCount = await stub.callCount
+        XCTAssertEqual(callCount, 1)
+
+        await capability.retryUnavailable()
         await capability.refresh()
 
-        let callCount = await stub.callCount
+        callCount = await stub.callCount
         XCTAssertEqual(callCount, 2)
         XCTAssertEqual(capability.requestQuery, ["image_size": "large"])
     }

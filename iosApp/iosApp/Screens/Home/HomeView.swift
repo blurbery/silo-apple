@@ -4,9 +4,23 @@ extension Notification.Name {
     static let homeSectionsShouldRefresh = Notification.Name("homeSectionsShouldRefresh")
 }
 
-/// Main home screen. iOS/macOS render resume-first section rows on a flat
-/// background; tvOS uses the Skyline focus marquee (§5.4) — a passive
-/// billboard previewing whichever card holds focus.
+/// Keeps audiobook containers out of the video player. Home section items do
+/// not carry the part metadata used by audiobook playback, so the hero opens
+/// details and lets the existing audiobook flow resolve the correct part.
+func dispatchFeaturedHeroPlay(
+    _ item: SectionItem,
+    onVideoPlay: (SectionItem) -> Void,
+    onInfo: (SectionItem) -> Void
+) {
+    if item.isAudiobook {
+        onInfo(item)
+    } else {
+        onVideoPlay(item)
+    }
+}
+
+/// Main home screen. iOS promotes the server's featured section into a
+/// full-bleed spotlight, while tvOS keeps its existing Skyline focus marquee.
 struct HomeView: View {
     var homeFocusRequest: Int = 0
     /// tvOS-only: whether the custom top menu holds focus. Deferred entry
@@ -17,6 +31,7 @@ struct HomeView: View {
 
     @State private var viewModel = HomeViewModel()
     #if !os(tvOS)
+    @State private var navPreferences = AppNavPreferences.shared
     @State private var currentProfile: UserProfile?
     @State private var homeScrollOffset: CGFloat = 0
     @State private var isRefreshing = false
@@ -30,6 +45,7 @@ struct HomeView: View {
     /// so the logo + action icons sit comfortably below the Dynamic Island
     /// rather than crowding it (matching Plex's tight-but-relaxed top spacing).
     private let headerTopInset: CGFloat = 4
+    private let featuredHeaderLift: CGFloat = -19
     /// Gap between the bottom of the floating header and the first content row.
     /// A touch larger than the inter-section spacing so the header reads as a
     /// distinct band above the rows.
@@ -94,7 +110,7 @@ struct HomeView: View {
                 .ignoresSafeArea()
 
             Group {
-                if !displayedSections.isEmpty {
+                if hasHomeContent {
                     scrollContent
                 } else if let error = viewModel.error {
                     ErrorView(state: error, onRetry: { Task { await viewModel.loadSections() } })
@@ -115,6 +131,7 @@ struct HomeView: View {
                 SidebarToggleButton()
 
                 SiloWordmarkView(width: 72)
+                    .offset(y: -2)
 
                 Spacer(minLength: 8)
 
@@ -123,7 +140,7 @@ struct HomeView: View {
                 // (matching Plex's top-right icon row).
                 HStack(spacing: ContinuumTheme.topBarIconSpacing) {
                     #if os(iOS)
-                    SiloControlModeButton(controller: siloControl) {
+                    SiloControlModeButton(controller: siloControl, usesGlassCircle: true) {
                         isShowingControlPicker = true
                     }
                     #endif
@@ -137,7 +154,8 @@ struct HomeView: View {
                             router.switchProfile()
                         },
                         onSwitchServer: { router.navigate(to: .serverList) },
-                        onSignOut: { router.signOutAndReset() }
+                        onSignOut: { router.signOutAndReset() },
+                        usesGlassCircles: true
                     )
                 }
             }
@@ -146,6 +164,9 @@ struct HomeView: View {
             .padding(.top, headerTopInset)
             #endif
             .padding(.bottom, ContinuumTheme.smallPadding)
+            #if os(iOS)
+            .offset(y: featuredHeaderLift)
+            #endif
             .background {
                 homeHeaderChrome
                     .opacity(headerChromeOpacity)
@@ -173,6 +194,7 @@ struct HomeView: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .task {
+            navPreferences.refresh()
             await viewModel.loadSections()
             await loadCurrentProfile()
         }
@@ -203,11 +225,42 @@ struct HomeView: View {
         GeometryReader { geometry in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: HomeFeedMetrics.sectionSpacing) {
-                    // No hero — reserve runway for the floating Home header so
-                    // the first row doesn't slide under the status-bar chrome.
-                    Color.clear
-                        .frame(height: topRunwaySpacing(topSafeAreaInset: geometry.safeAreaInsets.top))
-                        .id(HomeFocusTarget.topSpacer)
+                    #if os(iOS)
+                    if navPreferences.showFeaturedHero,
+                       let featured = viewModel.featuredSection {
+                        MobileFeaturedHero(
+                            items: featured.items,
+                            usesCardLayout: usesFeaturedHeroCardLayout,
+                            onPlay: playFeaturedItem,
+                            onInfo: { navigateToDetail($0.contentId) },
+                            loadTextlessPoster: { contentID, contentType in
+                                try await ContinuumAPI.shared.textlessPoster(
+                                    contentId: contentID,
+                                    contentType: contentType
+                                )
+                            }
+                        )
+                        // The card begins below the separate status/header band
+                        // instead of painting behind the logo and actions.
+                        .padding(
+                            .top,
+                            usesFeaturedHeroCardLayout
+                                ? featuredHeaderRunwaySpacing(
+                                    topSafeAreaInset: geometry.safeAreaInsets.top
+                                )
+                                : 0
+                        )
+                        // Keep the timer dots clear of Continue Watching while
+                        // retaining the tight, seamless transition into the
+                        // first row.
+                        .padding(.bottom, -(HomeFeedMetrics.sectionSpacing - 14))
+                        .id(HomeFocusTarget.featured)
+                    } else {
+                        topRunway(topSafeAreaInset: geometry.safeAreaInsets.top)
+                    }
+                    #else
+                    topRunway(topSafeAreaInset: geometry.safeAreaInsets.top)
+                    #endif
 
                     ForEach(displayedSections) { section in
                         HomeFeedRow(
@@ -230,9 +283,16 @@ struct HomeView: View {
             homeScrollOffset = max(0, newValue)
         }
     }
+
+    private func topRunway(topSafeAreaInset: CGFloat) -> some View {
+        Color.clear
+            .frame(height: topRunwaySpacing(topSafeAreaInset: topSafeAreaInset))
+            .id(HomeFocusTarget.topSpacer)
+    }
     #endif
 
     private enum HomeFocusTarget: Hashable {
+        case featured
         case topSpacer
         case row(String)
     }
@@ -240,8 +300,27 @@ struct HomeView: View {
     /// Rows for the vertical list, in server Home order after filtering empty
     /// and featured sections. Recommendations stay in the For You tab.
     private var displayedSections: [ResolvedSection] {
+        #if os(macOS)
+        return viewModel.sections.filter { !$0.items.isEmpty }
+        #else
         return viewModel.regularSections
+        #endif
     }
+
+    private var hasHomeContent: Bool {
+        #if os(iOS)
+        return (navPreferences.showFeaturedHero && viewModel.featuredSection != nil)
+            || !displayedSections.isEmpty
+        #else
+        return !displayedSections.isEmpty
+        #endif
+    }
+
+    #if os(iOS)
+    private var usesFeaturedHeroCardLayout: Bool {
+        navPreferences.useFeaturedHeroCards
+    }
+    #endif
 
     #if !os(tvOS)
     private var headerChromeOpacity: Double {
@@ -318,6 +397,24 @@ struct HomeView: View {
         router.navigate(to: .itemDetail(contentId: contentId))
     }
 
+    #if os(iOS)
+    private func playFeaturedItem(_ item: SectionItem) {
+        dispatchFeaturedHeroPlay(
+            item,
+            onVideoPlay: { playableItem in
+                router.presentPlayer(
+                    contentId: playableItem.contentId,
+                    resumePosition: playableItem.positionSeconds,
+                    returnToContentId: playableItem.contentId,
+                    posterURL: playableItem.posterUrl,
+                    backdropURL: playableItem.backdropUrl
+                )
+            },
+            onInfo: { navigateToDetail($0.contentId) }
+        )
+    }
+    #endif
+
     private func dismissContinueWatching(_ item: SectionItem) {
         Task {
             await viewModel.dismissContinueWatchingItem(item)
@@ -345,5 +442,14 @@ struct HomeView: View {
         #endif
         return runway
     }
+
+    #if os(iOS)
+    private func featuredHeaderRunwaySpacing(topSafeAreaInset: CGFloat) -> CGFloat {
+        topSafeAreaInset
+            + headerTopInset
+            + (ContinuumTheme.topBarIconHitSize * 2)
+            + 7
+    }
+    #endif
     #endif
 }
