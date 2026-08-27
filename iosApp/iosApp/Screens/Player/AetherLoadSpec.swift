@@ -7,9 +7,9 @@ import Foundation
 /// user's broader profile preference to Aether in that case can start a
 /// different track, publish first frame, and then force a full pipeline reload
 /// when the exact ordinal is applied after inventory arrives. Prefer the
-/// selected track's language for the first open; the existing post-probe
-/// ordinal reconciliation remains the exact fallback for unlabeled or
-/// same-language tracks.
+/// selected track's language for the first open. Non-default original-file
+/// tracks are resolved to an exact stream id before loading; the existing
+/// post-open reconciliation remains a fallback for partial metadata.
 enum AetherInitialAudioPreference {
     static func languages(
         selectedOrdinal: Int?,
@@ -25,6 +25,55 @@ enum AetherInitialAudioPreference {
 
         let fallback = fallbackLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
         return fallback.isEmpty ? [] : [fallback]
+    }
+
+    /// Whether an original-file load must resolve the plan's dense ordinal to
+    /// an AVStream id before opening Aether. The container default needs no
+    /// override; every other selection does. Language is deliberately ignored:
+    /// TrueHD and its compatibility track commonly share the same tag, so even
+    /// a non-empty language cannot prove which stream Aether will choose.
+    static func requiresExactStreamProbe(
+        selectedOrdinal: Int?,
+        tracks: [AudioTrack]
+    ) -> Bool {
+        guard let selectedOrdinal else { return false }
+        guard !tracks.isEmpty else { return true }
+        let defaultOrdinal = tracks.firstIndex { $0.isDefault == true } ?? 0
+        return selectedOrdinal != defaultOrdinal
+    }
+}
+
+/// Decides whether a committed Aether load failed because the bearer frozen
+/// into its media request expired, and whether rebuilding it would actually
+/// install a different credential.
+///
+/// Keep this typed and token-agnostic: AVFoundation localizes its messages,
+/// while the error domain/code and Aether's source-refusal status are stable.
+/// Comparing the complete header value bounds recovery to one reload per
+/// credential generation; a revoked current token falls through to the normal
+/// Protocol V3 route ladder instead of looping on the same URL forever.
+enum AetherAuthenticationRecoveryPolicy {
+    static func isExpiredBearerFailure(_ failure: PlaybackErrorInfo) -> Bool {
+        if failure.kind == .sourceRefused {
+            return failure.underlyingDomain == nil && failure.underlyingCode == 401
+        }
+        return failure.kind == .nativeItemFailed
+            && failure.underlyingDomain == NSURLErrorDomain
+            && failure.underlyingCode == NSURLErrorUserAuthenticationRequired
+    }
+
+    static func shouldReload(
+        failedHeaders: [String: String],
+        refreshedHeaders: [String: String]
+    ) -> Bool {
+        guard let refreshed = authorizationHeader(in: refreshedHeaders) else { return false }
+        return authorizationHeader(in: failedHeaders) != refreshed
+    }
+
+    private static func authorizationHeader(in headers: [String: String]) -> String? {
+        headers.first { key, _ in
+            key.caseInsensitiveCompare("Authorization") == .orderedSame
+        }?.value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -49,6 +98,10 @@ struct AetherLoadSpec {
     let delivery: String
     let sourceURL: URL
     let timeline: PlaybackTimelineMapper
+    /// Player-axis position handed to `AetherEngine.load`. Usually the plan's
+    /// declared start, but a same-plan credential reload resumes at the current
+    /// source position translated through the still-active timeline.
+    let aetherStartPosition: Double
     let options: LoadOptions
     let audioSourceStreamIndex: Int32?
     /// App-facing ids for `options.externalSubtitles`, positionally parallel to
@@ -123,6 +176,7 @@ struct AetherLoadSpec {
         delivery = PlaybackProtocolV3.PlanDelivery.originalHTTP
         sourceURL = offlineURL
         timeline = PlaybackTimelineMapper(directStartSeconds: startPosition)
+        aetherStartPosition = timeline.aetherStartPosition
         self.audioSourceStreamIndex = audioSourceStreamIndex
         externalSubtitleAppTrackIDs = sidecars.map { sidecar -> Int64? in
             SubtitleTrackIdSpace.makeSidecarTrackId(urlIndex: sidecar.index)
@@ -188,6 +242,7 @@ struct AetherLoadSpec {
         delivery = PlaybackProtocolV3.PlanDelivery.originalHTTP
         sourceURL = directURL
         timeline = PlaybackTimelineMapper(directStartSeconds: startPosition)
+        aetherStartPosition = timeline.aetherStartPosition
         audioSourceStreamIndex = nil
         externalSubtitleAppTrackIDs = sidecars.map { sidecar -> Int64? in
             SubtitleTrackIdSpace.makeSidecarTrackId(urlIndex: sidecar.index)
@@ -220,12 +275,14 @@ struct AetherLoadSpec {
         requestHeaders: [String: String]? = nil,
         resolveURL: ((String) -> URL?)? = nil,
         apiOriginURL: URL? = nil,
+        audioSourceStreamIndex: Int32? = nil,
         preferredAudioLanguages: [String] = [],
         preferredSubtitleLanguages: [String] = [],
         forwardBufferSegments: Int? = nil,
         audioBridgeMode: AudioBridgeMode = Self.defaultAudioBridgeMode,
         deinterlaceMode: DeinterlaceMode = Self.defaultDeinterlaceMode,
         deinterlaceFieldRate: DeinterlaceFieldRate = Self.defaultDeinterlaceFieldRate,
+        resumeSourcePosition: Double? = nil,
         panelIsInHDRMode: Bool? = nil
     ) throws {
         guard PlaybackProtocolV3.PlanDelivery.supported.contains(plan.delivery) else {
@@ -249,11 +306,10 @@ struct AetherLoadSpec {
         let effectiveHeaders = requestHeaders ?? plan.stream.headers
 
         // Protocol V3's selected audio index is an ordinal in the server's
-        // audio-track list, not an FFmpeg AVStream index. Keep it out of
-        // LoadOptions: after Aether publishes its probed inventory,
-        // PlayerViewModel maps that ordinal to Aether's stream id and applies
-        // the plan-authoritative selection. This lets original HTTP remain a
-        // byte-for-byte source while still honoring a non-default track.
+        // audio-track list, not an FFmpeg AVStream index. The caller resolves
+        // a non-default original-file ordinal through Aether's authenticated
+        // probe and passes the resulting stream id separately. The post-open
+        // reconciliation remains a fallback for older/partial metadata.
         if let selectedIndex = plan.selectedTracks.audio?.index {
             guard selectedIndex >= 0 else {
                 throw ValidationError.invalidAudioTrackIndex(selectedIndex)
@@ -318,7 +374,14 @@ struct AetherLoadSpec {
         self.delivery = plan.delivery
         self.sourceURL = sourceURL
         self.timeline = timeline
-        self.audioSourceStreamIndex = nil
+        if let resumeSourcePosition, resumeSourcePosition.isFinite {
+            aetherStartPosition = timeline.playerPosition(
+                forSourceTime: max(0, resumeSourcePosition)
+            )
+        } else {
+            aetherStartPosition = timeline.aetherStartPosition
+        }
+        self.audioSourceStreamIndex = audioSourceStreamIndex
         self.externalSubtitleAppTrackIDs = externalSubtitleAppTrackIDs
         let isServerHLS = [
             PlaybackProtocolV3.PlanDelivery.remuxHLS,

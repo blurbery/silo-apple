@@ -73,6 +73,22 @@ final class AetherPlaybackBoundaryTests: XCTestCase {
         XCTAssertEqual(languages, ["en"])
     }
 
+    func testNonDefaultSameLanguageAudioRequiresAnExactFirstOpenProbe() {
+        let tracks = [
+            makeAudioTrack(language: "eng", isDefault: true),
+            makeAudioTrack(language: "eng", isDefault: false),
+        ]
+
+        XCTAssertFalse(AetherInitialAudioPreference.requiresExactStreamProbe(
+            selectedOrdinal: 0,
+            tracks: tracks
+        ))
+        XCTAssertTrue(AetherInitialAudioPreference.requiresExactStreamProbe(
+            selectedOrdinal: 1,
+            tracks: tracks
+        ))
+    }
+
     private func makeAudioTrack(language: String?, isDefault: Bool) -> AudioTrack {
         AudioTrack(
             index: nil,
@@ -107,6 +123,62 @@ final class AetherPlaybackBoundaryTests: XCTestCase {
         XCTAssertEqual(request.headers["Authorization"], "Bearer current-token")
         XCTAssertNil(request.headers["authorization"])
         XCTAssertEqual(request.headers["X-Transport"], "preserved")
+    }
+
+    func testExpiredBearerRecoveryRecognizesTypedSourceAndAVPlayer401Failures() {
+        XCTAssertTrue(AetherAuthenticationRecoveryPolicy.isExpiredBearerFailure(
+            PlaybackErrorInfo(
+                kind: .sourceRefused,
+                message: "origin refused source",
+                underlyingCode: 401
+            )
+        ))
+        XCTAssertTrue(AetherAuthenticationRecoveryPolicy.isExpiredBearerFailure(
+            PlaybackErrorInfo(
+                kind: .nativeItemFailed,
+                message: "localized AVPlayer failure",
+                underlyingDomain: NSURLErrorDomain,
+                underlyingCode: NSURLErrorUserAuthenticationRequired
+            )
+        ))
+    }
+
+    func testExpiredBearerRecoveryRejectsNonAuthenticationFailures() {
+        for failure in [
+            PlaybackErrorInfo(
+                kind: .sourceRefused,
+                message: "forbidden",
+                underlyingCode: 403
+            ),
+            PlaybackErrorInfo(
+                kind: .nativeItemFailed,
+                message: "timed out",
+                underlyingDomain: NSURLErrorDomain,
+                underlyingCode: NSURLErrorTimedOut
+            ),
+            PlaybackErrorInfo(
+                kind: .vodSourceFailed,
+                message: "read failed",
+                underlyingCode: 401
+            ),
+        ] {
+            XCTAssertFalse(AetherAuthenticationRecoveryPolicy.isExpiredBearerFailure(failure))
+        }
+    }
+
+    func testExpiredBearerRecoveryRequiresAChangedAuthorizationHeader() {
+        XCTAssertTrue(AetherAuthenticationRecoveryPolicy.shouldReload(
+            failedHeaders: ["authorization": "Bearer old-token"],
+            refreshedHeaders: ["Authorization": "Bearer new-token"]
+        ))
+        XCTAssertFalse(AetherAuthenticationRecoveryPolicy.shouldReload(
+            failedHeaders: ["Authorization": "Bearer current-token"],
+            refreshedHeaders: ["authorization": "Bearer current-token"]
+        ))
+        XCTAssertFalse(AetherAuthenticationRecoveryPolicy.shouldReload(
+            failedHeaders: ["Authorization": "Bearer old-token"],
+            refreshedHeaders: [:]
+        ))
     }
 
     func testHeaderAuthenticatedStreamRejectsAbsoluteAndNonMediaRoutes() {
@@ -430,6 +502,7 @@ final class AetherPlaybackBoundaryTests: XCTestCase {
                 "Authorization": "Bearer current-token",
             ],
             resolveURL: { URL(string: $0, relativeTo: URL(string: "https://dev.example.test")) },
+            audioSourceStreamIndex: 7,
             preferredAudioLanguages: ["eng"],
             preferredSubtitleLanguages: ["eng"]
         )
@@ -442,7 +515,7 @@ final class AetherPlaybackBoundaryTests: XCTestCase {
         ])
         XCTAssertEqual(spec.options.preferredAudioLanguages, ["eng"])
         XCTAssertEqual(spec.options.preferredSubtitleLanguages, ["eng"])
-        XCTAssertNil(spec.audioSourceStreamIndex)
+        XCTAssertEqual(spec.audioSourceStreamIndex, 7)
         XCTAssertFalse(spec.options.audioOnly)
         XCTAssertFalse(spec.options.autoplay)
         XCTAssertFalse(spec.options.nativeRemoteHLS)
@@ -482,6 +555,44 @@ final class AetherPlaybackBoundaryTests: XCTestCase {
 
         XCTAssertTrue(spec.options.nativeRemoteHLS)
         XCTAssertEqual(spec.options.httpHeaders["Authorization"], "Bearer test")
+    }
+
+    func testV3CredentialReloadTranslatesCurrentSourcePositionOntoPlanTimeline() throws {
+        let fixtureURL = try PlaybackV3FixtureTestSupport.fixtureURL(
+            named: "decision_response",
+            bundleClass: Self.self
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as? [String: Any]
+        )
+        var planObject = try XCTUnwrap(object["playback_plan"] as? [String: Any])
+        var timeline = try XCTUnwrap(planObject["timeline"] as? [String: Any])
+        timeline["source_start_seconds"] = 42.5
+        timeline["stream_origin_seconds"] = 30.0
+        timeline["player_start_seconds"] = 12.5
+        timeline["timeline_offset_seconds"] = 30.0
+        planObject["timeline"] = timeline
+        object["playback_plan"] = planObject
+
+        let response = try PlaybackV3FixtureTestSupport.decoder.decode(
+            PlaybackV3DecisionResponse.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+        guard case .playable(let plan, let sessionID) = response.validatedForApple() else {
+            return XCTFail("Expected a playable fixture")
+        }
+        let spec = try AetherLoadSpec(
+            validating: plan,
+            sessionID: sessionID,
+            matchContentEnabled: false,
+            sourceURLOverride: URL(string: "https://dev.example.test/api/v1/stream/session"),
+            requestHeaders: ["Authorization": "Bearer refreshed-token"],
+            resumeSourcePosition: 92.0,
+            panelIsInHDRMode: false
+        )
+
+        XCTAssertEqual(spec.timeline.aetherStartPosition, 12.5)
+        XCTAssertEqual(spec.aetherStartPosition, 62.0)
     }
 
     func testV3SubtitleArtifactUsesMergedCurrentRequestHeaders() throws {
@@ -1115,6 +1226,28 @@ final class AetherPlaybackBoundaryTests: XCTestCase {
             .ignore,
             "an uncommitted load must not start transport even when the route looks live"
         )
+    }
+
+    func testTransportIntentCanChangeDuringAnUncommittedLoad() throws {
+        let controller = try AetherPlaybackController()
+        defer { controller.stop() }
+        let spec = try AetherLoadSpec(
+            directURL: URL(string: "https://dev.example.test/media.mp4")!,
+            headers: [:],
+            startPosition: 0,
+            audioOnly: false
+        )
+
+        controller.beginLoad(spec, shouldPlayWhenReady: false)
+        XCTAssertFalse(controller.shouldPlayWhenReady)
+
+        // Play is deliberately ignored by the engine until finishLoad, but
+        // the user's intent must still be retained for the commit boundary.
+        controller.play()
+        XCTAssertTrue(controller.shouldPlayWhenReady)
+
+        controller.pause()
+        XCTAssertFalse(controller.shouldPlayWhenReady)
     }
 
     func testPlayAfterCommitRestoresATornDownSession() {
