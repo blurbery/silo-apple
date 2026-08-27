@@ -283,15 +283,15 @@ final class AetherPlaybackController {
 
     func dispose() { stop() }
 
-    /// Stops the outgoing item while keeping Aether's cross-item handoff
-    /// state alive for the replacement load. In particular, tvOS must not
-    /// reset the panel to its default display criteria between consecutive
-    /// episodes, and the shared audio session must not be released while the
-    /// next item is already being prepared.
+    /// Pauses the outgoing item while keeping Aether's native host mounted for
+    /// the replacement load. The next `engine.load` then owns the teardown and
+    /// can perform its native-to-native handoff without resetting the tvOS
+    /// display criteria, replacing the player layer, or releasing the shared
+    /// audio session in between consecutive episodes.
     func prepareForReplacement() {
         invalidateActiveLoad()
         engine.deactivatesAudioSessionOnStop = false
-        engine.stop(resetDisplayCriteria: false, finalTeardown: false)
+        engine.pause()
         refreshExternalPlaybackState()
         publishSystemMediaChanged()
     }
