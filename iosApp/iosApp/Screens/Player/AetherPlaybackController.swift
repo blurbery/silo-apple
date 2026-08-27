@@ -283,6 +283,19 @@ final class AetherPlaybackController {
 
     func dispose() { stop() }
 
+    /// Pauses the outgoing item while keeping Aether's native host mounted for
+    /// the replacement load. The next `engine.load` then owns the teardown and
+    /// can perform its native-to-native handoff without resetting the tvOS
+    /// display criteria, replacing the player layer, or releasing the shared
+    /// audio session in between consecutive episodes.
+    func prepareForReplacement() {
+        invalidateActiveLoad()
+        engine.deactivatesAudioSessionOnStop = false
+        engine.pause()
+        refreshExternalPlaybackState()
+        publishSystemMediaChanged()
+    }
+
     var isPaused: Bool { engine.state != .playing }
 
     #if os(iOS) || os(tvOS)
@@ -369,18 +382,7 @@ final class AetherPlaybackController {
     }
 
     func stop() {
-        generation &+= 1
-        transportIntentGeneration &+= 1
-        transportRestoreTask?.cancel()
-        transportRestoreTask = nil
-        activeLoadEpoch = nil
-        hasCommittedActiveLoad = false
-        activeSpec = nil
-        configureExternalPlaybackPolicy()
-        aetherSubtitleIDByAppID = [:]
-        appSubtitleIDByAetherID = [:]
-        didPublishFirstFrame = false
-        didPublishEnd = false
+        invalidateActiveLoad()
         // Leaving video is the app's last use of the shared `AVAudioSession` unless an
         // audiobook is live. Aether never releases the session unless the host opts in
         // per teardown (#215, README "Who owns the audio session"), and a session left
@@ -395,6 +397,21 @@ final class AetherPlaybackController {
         engine.stop(finalTeardown: true)
         refreshExternalPlaybackState()
         publishSystemMediaChanged()
+    }
+
+    private func invalidateActiveLoad() {
+        generation &+= 1
+        transportIntentGeneration &+= 1
+        transportRestoreTask?.cancel()
+        transportRestoreTask = nil
+        activeLoadEpoch = nil
+        hasCommittedActiveLoad = false
+        activeSpec = nil
+        configureExternalPlaybackPolicy()
+        aetherSubtitleIDByAppID = [:]
+        appSubtitleIDByAetherID = [:]
+        didPublishFirstFrame = false
+        didPublishEnd = false
     }
 
     /// Seeds the alias map for the tracks Aether registers itself during
