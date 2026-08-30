@@ -249,9 +249,10 @@ class PlayerViewModel {
     }
 
     /// Keeps the auxiliary Aether still decoder in the same lifetime as the
-    /// transport. Callers that own final teardown can await the returned task.
+    /// transport. Replacement loads preserve Aether's display/audio handoff;
+    /// callers that own final teardown can await the returned task.
     @discardableResult
-    private func disposeAetherPlayback() -> Task<Void, Never>? {
+    private func disposeAetherPlayback(forReplacement: Bool = false) -> Task<Void, Never>? {
         let previewShutdown = scrubPreviewProvider.endSession()
         activeAetherLoadEpoch = nil
         establishedAetherLoadEpoch = nil
@@ -259,7 +260,11 @@ class PlayerViewModel {
         pendingProtocolV3FirstFrameEpoch = nil
         pendingProtocolV3SeekReanchorPosition = nil
         pendingProtocolV3TrackChange = nil
-        aetherPlaybackController.dispose()
+        if forReplacement {
+            aetherPlaybackController.prepareForReplacement()
+        } else {
+            aetherPlaybackController.dispose()
+        }
         return previewShutdown
     }
 
@@ -1919,10 +1924,12 @@ class PlayerViewModel {
                 }
                 try self.requireCurrentStreamLoad(currentStreamLoadGeneration)
                 self.resolvedServerUrl = streamRequest.serverUrl
+                let shouldPlayWhenReady = self.aetherPlaybackController.shouldPlayWhenReady
                 try await self.loadAether(
                     prepared: prepared,
                     streamRequest: streamRequest,
-                    expectedStreamLoadGeneration: currentStreamLoadGeneration
+                    expectedStreamLoadGeneration: currentStreamLoadGeneration,
+                    shouldPlayWhenReady: shouldPlayWhenReady
                 )
                 guard await self.sessionBridge.commitPendingProtocolV3Transition(prepared) else {
                     throw CancellationError()
@@ -2539,7 +2546,7 @@ class PlayerViewModel {
         streamRequest: StreamRequest,
         expectedStreamLoadGeneration: UInt64,
         resumeSourcePosition: Double? = nil,
-        shouldPlayWhenReady: Bool = true
+        shouldPlayWhenReady: Bool
     ) async throws {
         try requireCurrentStreamLoad(expectedStreamLoadGeneration)
         let preferredSubtitles = subtitleOrderingLanguage.map { [$0] } ?? []
@@ -3393,6 +3400,11 @@ class PlayerViewModel {
         seekOriginTime = nil
         seekTargetTime = nil
         showControls = false
+        // The HUD belongs to the outgoing item. Replans deliberately bypass
+        // this reset so the HUD survives them; a replacement load must close
+        // it, both because its content is stale and because the tvOS controls
+        // host stays mounted through `isLoading` whenever this flag is up.
+        isHUDPresented = false
         showNextUpScreen = false
         nextUpEpisode = nil
         nextUpOnDeckItems = []
@@ -3637,7 +3649,7 @@ class PlayerViewModel {
                   currentStreamLoadGeneration == self.streamLoadGeneration else { return }
 
             do {
-                self.disposeAetherPlayback()
+                self.disposeAetherPlayback(forReplacement: true)
                 guard !Task.isCancelled, !self.isDisposed else { return }
 
                 // The init kicked off `settingsRefreshTask` to fetch the
@@ -3782,7 +3794,8 @@ class PlayerViewModel {
                 try await self.loadAether(
                     prepared: prepared,
                     streamRequest: streamRequest,
-                    expectedStreamLoadGeneration: currentStreamLoadGeneration
+                    expectedStreamLoadGeneration: currentStreamLoadGeneration,
+                    shouldPlayWhenReady: true
                 )
                 if prepared.protocolV3 != nil {
                     guard await self.sessionBridge.commitPendingProtocolV3Transition(prepared) else {
@@ -7021,6 +7034,17 @@ class PlayerViewModel {
     private static let autoHideSeconds: UInt64 = 5
 
     private func scheduleHideControls() {
+        // The HUD pins its host visible (`pinControlsVisible` in `openHUD`).
+        // Actions taken from inside it — track selection, remote play/pause —
+        // funnel through here and must not re-arm the auto-hide out from
+        // under the open HUD: on tvOS the hide swaps the press-capture sink
+        // in beneath it, splitting remote presses across two owners.
+        // `closeHUD()` calls back in after clearing the flag, which restores
+        // the normal auto-hide lifecycle.
+        if isHUDPresented {
+            pinControlsVisible()
+            return
+        }
         hideControlsTask?.cancel()
         showControls = true
         hideControlsTask = Task { @MainActor [weak self] in
