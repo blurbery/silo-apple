@@ -20,6 +20,12 @@ class RecommendationsViewModel {
     }
 
     func loadRecommendations() async {
+        // MainTabView starts this before the lazy For You tab is constructed.
+        // If the destination appears while that same model is still loading,
+        // keep observing the in-flight result instead of scheduling duplicate
+        // view work around the shared network single-flight.
+        guard !isLoading, !isRefreshing else { return }
+
         if sections.isEmpty {
             isLoading = true
         } else {
