@@ -20,6 +20,9 @@ class ItemDetailViewModel {
     /// so it must not be stretched into the iPad hero's portrait slot.
     var episodeSeriesPosterUrl: String?
     var episodeSeriesPosterThumbhash: String?
+    /// Parent-series clear logo for episode heroes. Episode catalog payloads
+    /// commonly omit it, so resolve it alongside the parent poster.
+    var episodeSeriesLogoUrl: String?
     /// Route-scoped pages already loaded while browsing seasons. This keeps
     /// chip taps and iPad page swipes instant when the user comes back to a
     /// season, while `ResponseCache` remains the longer-lived cold-start tier.
@@ -55,6 +58,12 @@ class ItemDetailViewModel {
     /// payload paints immediately; this task upgrades it in place afterward.
     @ObservationIgnored
     private var playbackEnrichmentTask: Task<Void, Never>?
+    /// Once the initially-selected season is known, the remaining episode
+    /// pages are warmed quietly in nearest-season order. A later chip tap then
+    /// takes the same synchronous cache path the user already described as
+    /// smooth, without putting those requests on the first-paint critical path.
+    @ObservationIgnored
+    private var seasonEpisodePrefetchTask: Task<Void, Never>?
 
     // User actions
     var isFavorite = false
@@ -91,8 +100,11 @@ class ItemDetailViewModel {
     ///   reload leave it false: there, re-picking the season is the point.
     func loadDetail(contentId: String, preserveSeasonSelection: Bool = false) async {
         if detail?.contentId != contentId {
+            seasonEpisodePrefetchTask?.cancel()
+            seasonEpisodePrefetchTask = nil
             episodeSeriesPosterUrl = nil
             episodeSeriesPosterThumbhash = nil
+            episodeSeriesLogoUrl = nil
         }
 
         // Stage 1 — hydrate from cache synchronously so the view paints
@@ -299,6 +311,7 @@ class ItemDetailViewModel {
         guard detail?.type == "episode", detail?.seriesId == seriesId else { return }
         episodeSeriesPosterUrl = seriesDetail.posterUrl
         episodeSeriesPosterThumbhash = seriesDetail.posterThumbhash
+        episodeSeriesLogoUrl = seriesDetail.logoUrl
     }
 
     /// Adopt a detail payload the caller already has in hand, taking the
@@ -574,11 +587,103 @@ class ItemDetailViewModel {
             ResponseCache.shared.set(response, for: CacheKey.itemSeasons(seriesId))
             seasons = response.seasons.sortedForDisplay()
             if autoSelectInitial, let target = preferredInitialSeason(seasons: seasons) {
+                startEpisodePagePrefetch(
+                    seriesId: seriesId,
+                    seasons: seasons,
+                    selectedSeason: target
+                )
                 await selectSeason(target, forceRefresh: true)
             }
         } catch {
             // Seasons loading failure is non-fatal — keep whatever
             // hydrated from cache.
+        }
+    }
+
+    /// Warm cached pages synchronously and missing pages two at a time. The
+    /// chosen season continues through `loadEpisodes` normally; everything
+    /// else lands only in route memory + ResponseCache and never mutates the
+    /// selected chip, painted episode list, or loading state.
+    private func startEpisodePagePrefetch(
+        seriesId: String,
+        seasons: [Season],
+        selectedSeason: Season
+    ) {
+        seasonEpisodePrefetchTask?.cancel()
+
+        let selectedIndex = seasons.firstIndex(where: { $0.id == selectedSeason.id }) ?? 0
+        let prioritized = seasons.enumerated()
+            .filter { $0.element.seasonNumber != selectedSeason.seasonNumber }
+            .sorted { lhs, rhs in
+                abs(lhs.offset - selectedIndex) < abs(rhs.offset - selectedIndex)
+            }
+            .map(\.element)
+
+        var missing: [Season] = []
+        for season in prioritized {
+            guard episodesBySeason[season.seasonNumber] == nil else { continue }
+            let key = CacheKey.itemEpisodes(
+                seriesId: seriesId,
+                seasonNumber: season.seasonNumber
+            )
+            if let cached: EpisodesResponse = ResponseCache.shared.get(key) {
+                episodesBySeason[season.seasonNumber] = cached.episodes.sorted {
+                    $0.episodeNumber < $1.episodeNumber
+                }
+            } else {
+                missing.append(season)
+            }
+        }
+
+        guard !missing.isEmpty else { return }
+        seasonEpisodePrefetchTask = Task { [weak self] in
+            for batchStart in stride(from: 0, to: missing.count, by: 2) {
+                guard !Task.isCancelled else { return }
+                let batchEnd = min(batchStart + 2, missing.count)
+                let batch = Array(missing[batchStart..<batchEnd])
+                let fetched = await withTaskGroup(
+                    of: (seasonNumber: Int, response: EpisodesResponse?).self
+                ) { group in
+                    for season in batch {
+                        group.addTask {
+                            let response = try? await ContinuumAPI.shared.episodes(
+                                seriesId: seriesId,
+                                seasonNumber: season.seasonNumber
+                            )
+                            return (season.seasonNumber, response)
+                        }
+                    }
+
+                    var results: [(Int, EpisodesResponse?)] = []
+                    for await result in group {
+                        results.append(result)
+                    }
+                    return results
+                }
+
+                guard !Task.isCancelled,
+                      let self,
+                      self.seriesContentId == seriesId else { return }
+
+                for (seasonNumber, response) in fetched {
+                    guard let response else { continue }
+                    ResponseCache.shared.set(
+                        response,
+                        for: CacheKey.itemEpisodes(
+                            seriesId: seriesId,
+                            seasonNumber: seasonNumber
+                        )
+                    )
+                    if self.episodesBySeason[seasonNumber] == nil {
+                        self.episodesBySeason[seasonNumber] = response.episodes.sorted {
+                            $0.episodeNumber < $1.episodeNumber
+                        }
+                    }
+                }
+            }
+
+            guard !Task.isCancelled, let self, self.seriesContentId == seriesId else { return }
+            self.seasonEpisodePrefetchTask = nil
         }
     }
 
