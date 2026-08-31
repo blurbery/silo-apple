@@ -68,6 +68,7 @@ struct HomeView: View {
             if !displayedSections.isEmpty {
                 TVSkylineSectionFeed(
                     sections: displayedSections,
+                    contentVerticalOffset: 56,
                     focusRequest: homeFocusRequest,
                     isTopMenuFocused: isTopMenuFocused,
                     onTopMenuFocusRequest: onTopMenuFocusRequest,
