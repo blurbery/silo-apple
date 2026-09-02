@@ -3,6 +3,10 @@ import SwiftUI
 /// Grid of the user's favorited items.
 struct FavoritesView: View {
     let showsNavigationTitle: Bool
+    let usesTVTopMenu: Bool
+    var focusRequest: Int
+    var isTopMenuFocused: Bool
+    var onTopMenuFocusRequest: (() -> Void)?
 
     @State private var items: [BrowseItem] = []
     @State private var isLoading = false
@@ -10,19 +14,17 @@ struct FavoritesView: View {
     @State private var uiCustomization = UICustomizationPreferences.shared
     #if os(tvOS)
     @State private var selectedSection: FavoriteMediaSection = .movies
+    @FocusState private var focusedSection: FavoriteMediaSection?
+    @State private var lastAppliedFocusRequest = 0
     #endif
     @Environment(AppRouter.self) private var router
     @Environment(\.horizontalSizeClass) private var hSize
 
     private var columns: [GridItem] {
         #if os(tvOS)
-        let count = AdaptiveColumns.tvPosterCount(
-            standardCount: 6,
-            posterSize: uiCustomization.cardPresentation.posterSize
-        )
         return Array(
-            repeating: GridItem(.flexible(), spacing: 48, alignment: .top),
-            count: count
+            repeating: GridItem(.flexible(), spacing: 40, alignment: .top),
+            count: 8
         )
         #else
         AdaptiveColumns.posters(
@@ -32,8 +34,18 @@ struct FavoritesView: View {
         #endif
     }
 
-    init(showsNavigationTitle: Bool = true) {
+    init(
+        showsNavigationTitle: Bool = true,
+        usesTVTopMenu: Bool = false,
+        focusRequest: Int = 0,
+        isTopMenuFocused: Bool = false,
+        onTopMenuFocusRequest: (() -> Void)? = nil
+    ) {
         self.showsNavigationTitle = showsNavigationTitle
+        self.usesTVTopMenu = usesTVTopMenu
+        self.focusRequest = focusRequest
+        self.isTopMenuFocused = isTopMenuFocused
+        self.onTopMenuFocusRequest = onTopMenuFocusRequest
     }
 
     var body: some View {
@@ -66,6 +78,11 @@ struct FavoritesView: View {
         .refreshable {
             await loadFavorites()
         }
+        #if os(tvOS)
+        .onAppear { applyFocusRequest(focusRequest) }
+        .onChange(of: focusRequest) { _, request in applyFocusRequest(request) }
+        .onChange(of: items.map(\.contentId)) { _, _ in applyFocusRequest(focusRequest) }
+        #endif
     }
 
     @ViewBuilder
@@ -111,6 +128,12 @@ struct FavoritesView: View {
     private var tvGridContent: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 40) {
+                if usesTVTopMenu {
+                    Text("Favorites")
+                        .font(.system(size: 64, weight: .bold))
+                        .foregroundStyle(Color.continuumOnSurface)
+                }
+
                 sectionSelector
 
                 if filteredItems.isEmpty {
@@ -130,7 +153,7 @@ struct FavoritesView: View {
                 }
             }
             .padding(.horizontal, ContinuumTheme.safePadding)
-            .padding(.top, 20)
+            .padding(.top, usesTVTopMenu ? TVTopMenuLayout.contentTopInset : 20)
             .padding(.bottom, ContinuumTheme.safePadding)
         }
     }
@@ -149,11 +172,17 @@ struct FavoritesView: View {
                 }
                 .buttonStyle(FavoriteSectionPillStyle(isSelected: selectedSection == section))
                 .accessibilityAddTraits(selectedSection == section ? .isSelected : [])
+                .focused($focusedSection, equals: section)
             }
 
             Spacer(minLength: 0)
         }
         .focusSection()
+        .onMoveCommand { direction in
+            if direction == .up {
+                onTopMenuFocusRequest?()
+            }
+        }
     }
 
     private var selectedSectionEmptyState: some View {
@@ -186,7 +215,7 @@ struct FavoritesView: View {
             },
             playAction: playAction(for: item),
             contentId: item.contentId,
-            cardWidthOverride: 252,
+            cardWidthOverride: tvCardWidthOverride,
             onUserStateChanged: { state in
                 guard !state.isFavorite else { return }
                 withAnimation(.easeInOut(duration: ContinuumTheme.normalDuration)) {
@@ -194,6 +223,23 @@ struct FavoritesView: View {
                 }
             }
         )
+    }
+
+    /// `MediaCard` applies the global size preference after this override;
+    /// divide it out so the final eight-across grid stays at 176 points.
+    private var tvCardWidthOverride: CGFloat {
+        ContinuumTheme.Skyline.densePosterCardWidth
+            / uiCustomization.cardPresentation.posterSize.scale
+    }
+
+    private func applyFocusRequest(_ request: Int) {
+        guard usesTVTopMenu,
+              request > 0,
+              request != lastAppliedFocusRequest,
+              !isTopMenuFocused,
+              !items.isEmpty else { return }
+        lastAppliedFocusRequest = request
+        focusedSection = selectedSection
     }
     #endif
 
