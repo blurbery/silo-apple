@@ -1,5 +1,7 @@
 #if os(tvOS)
 import SwiftUI
+import Nuke
+import NukeUI
 
 /// Shared 1920×1080 detail metrics. These are deliberately separate from the
 /// root Skyline metrics: the detail experience has its own approved rhythm,
@@ -64,6 +66,7 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
     let seriesTitle: String?
     let logoUrl: String?
     let backdropUrl: String?
+    let backdropThumbhash: String?
     /// Optional short editorial line placed in a capsule above the title
     /// (e.g. "New Episode Friday", "Continuing Series"). Hidden when nil.
     let eyebrow: String?
@@ -161,6 +164,7 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
                 CachedAsyncImage(
                     url: url,
                     targetSize: CGSize(width: artworkWidth, height: artworkHeight),
+                    thumbhash: backdropThumbhash,
                     contentMode: .fill
                 )
                 .frame(width: artworkWidth, height: artworkHeight)
@@ -369,17 +373,15 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
                 episodeTitle: title,
                 logoUrl: logoUrl
             )
-        } else if let logoUrl, !logoUrl.isEmpty {
-            CachedAsyncImage(
-                url: logoUrl,
-                contentMode: .fit,
-                alignment: .bottomLeading,
-                placeholderStyle: .clear
-            )
-                .frame(maxWidth: 650, maxHeight: 160, alignment: .bottomLeading)
-                .accessibilityLabel(title)
         } else {
-            TVHeroTitle(title: title)
+            TVDecodedLogoTitle(
+                logoUrl: logoUrl,
+                accessibilityLabel: title,
+                maxWidth: 650,
+                maxHeight: 160
+            ) {
+                TVHeroTitle(title: title)
+            }
         }
     }
 
@@ -566,6 +568,84 @@ private struct TVHeroTitle: View {
     }
 }
 
+/// Keeps the text identity on screen until server logo artwork has actually
+/// decoded. A prefetched logo is seeded synchronously so warm detail entry does
+/// not paint one intermediate frame of text before showing the finished art.
+struct TVDecodedLogoTitle<Fallback: View>: View {
+    let logoUrl: String?
+    let accessibilityLabel: String
+    let maxWidth: CGFloat
+    let maxHeight: CGFloat
+    @ViewBuilder let fallback: () -> Fallback
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(
+        logoUrl: String?,
+        accessibilityLabel: String,
+        maxWidth: CGFloat,
+        maxHeight: CGFloat,
+        @ViewBuilder fallback: @escaping () -> Fallback
+    ) {
+        self.logoUrl = logoUrl
+        self.accessibilityLabel = accessibilityLabel
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
+        self.fallback = fallback
+    }
+
+    @ViewBuilder
+    var body: some View {
+        Group {
+            if let normalizedLogoURL {
+                let request = ImageRequest(url: normalizedLogoURL)
+                let cachedImage = ImagePipeline.shared.cache[request]?.image
+                LazyImage(
+                    request: request,
+                    transaction: Transaction(
+                        animation: reduceMotion || cachedImage != nil
+                            ? nil
+                            : .easeInOut(duration: 0.2)
+                    )
+                ) { state in
+                    if let image = state.image {
+                        renderedLogo(image)
+                            .transition(reduceMotion ? .identity : .opacity)
+                    } else if let cachedImage {
+                        renderedLogo(Image(platformImage: cachedImage))
+                    } else {
+                        fallback()
+                    }
+                }
+            } else {
+                fallback()
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var normalizedLogoURL: URL? {
+        guard let normalized = logoUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalized.isEmpty else {
+            return nil
+        }
+        return URL(string: normalized)
+    }
+
+    private func renderedLogo(_ image: Image) -> some View {
+        image
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(
+                maxWidth: maxWidth,
+                maxHeight: maxHeight,
+                alignment: .bottomLeading
+            )
+            .accessibilityHidden(true)
+    }
+}
+
 private struct TVEpisodeHierarchyTitle: View {
     let seriesTitle: String
     let episodeTitle: String
@@ -573,16 +653,12 @@ private struct TVEpisodeHierarchyTitle: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let logoUrl, !logoUrl.isEmpty {
-                CachedAsyncImage(
-                    url: logoUrl,
-                    contentMode: .fit,
-                    alignment: .bottomLeading,
-                    placeholderStyle: .clear
-                )
-                    .frame(maxWidth: 650, maxHeight: 140, alignment: .bottomLeading)
-                    .accessibilityLabel(seriesTitle)
-            } else {
+            TVDecodedLogoTitle(
+                logoUrl: logoUrl,
+                accessibilityLabel: seriesTitle,
+                maxWidth: 650,
+                maxHeight: 140
+            ) {
                 Text(seriesTitle.uppercased())
                     .font(seriesFont)
                     .foregroundColor(.white)
@@ -884,8 +960,8 @@ private struct TVPlaybackSelectionSummaryView: View {
             )
         }
         // This matches the compact no-Restart action-row footprint. Starts stay
-        // fixed between episodes, while an unusually long value wraps inside
-        // its own slot instead of extending into the backdrop artwork.
+        // fixed between episodes, while unusually long values scale down inside
+        // their own slot instead of wrapping or extending into the artwork.
         .frame(width: 810, height: 44, alignment: .topLeading)
     }
 
@@ -908,10 +984,10 @@ private struct TVPlaybackSelectionSummaryView: View {
                     Text(value)
                         .font(.system(size: 18, weight: .medium))
                         .foregroundColor(Color.white.opacity(0.82))
-                        .lineLimit(2)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                         .allowsTightening(true)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
                 } else {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .fill(Color.white.opacity(0.14))

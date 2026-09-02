@@ -1,0 +1,205 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "17 3,9,15,21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: Silo-Server/silo-apple
+  UPSTREAM_BRANCH: main
+  XCODEGEN_VERSION: "2.43.0"
+
+jobs:
+  sync:
+    name: Merge, validate, and update main
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the fork main branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream on a temporary branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "blurbery"
+          git config user.email "blurbery@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+
+          fetched=false
+          for attempt in 1 2 3; do
+            if git fetch --no-tags upstream "${UPSTREAM_BRANCH}"; then
+              fetched=true
+              break
+            fi
+            if (( attempt < 3 )); then
+              sleep $((attempt * 5))
+            fi
+          done
+          if [[ "$fetched" != "true" ]]; then
+            echo "::error title=Upstream fetch failed::Unable to fetch upstream after three attempts."
+            exit 1
+          fi
+
+          base_sha="$(git rev-parse HEAD)"
+          upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          {
+            echo "base_sha=${base_sha}"
+            echo "upstream_sha=${upstream_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor "upstream/${UPSTREAM_BRANCH}" HEAD; then
+            {
+              echo "changed=false"
+              echo "blocked=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "Fork main already contains the latest upstream commit."
+            exit 0
+          fi
+
+          git switch -c "automation/upstream-sync-${GITHUB_RUN_ID}"
+          if git merge --no-ff --no-edit "upstream/${UPSTREAM_BRANCH}"; then
+            {
+              echo "changed=true"
+              echo "blocked=false"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          conflicts="$(git diff --name-only --diff-filter=U)"
+          if [[ -z "$conflicts" ]]; then
+            echo "::error title=Upstream merge failed::The merge failed without producing resolvable conflict entries."
+            exit 1
+          fi
+
+          git merge --abort
+          {
+            echo "changed=false"
+            echo "blocked=true"
+            echo "conflicts<<EOF"
+            printf '%s\n' "$conflicts"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "::warning title=Upstream sync needs conflict resolution::Fork main was left unchanged. See the job summary for the conflicting files."
+
+      - name: Report a blocked sync
+        if: steps.merge.outputs.blocked == 'true'
+        shell: bash
+        env:
+          CONFLICTS: ${{ steps.merge.outputs.conflicts }}
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+        run: |
+          {
+            echo "## Upstream sync needs conflict resolution"
+            echo
+            echo "This run completed without changing the fork's \`main\` branch."
+            echo "Upstream commit: \`${UPSTREAM_SHA}\`"
+            echo
+            echo "Conflicting files:"
+            printf '%s\n' "$CONFLICTS" | while IFS= read -r path; do
+              if [[ -n "$path" ]]; then
+                echo "- \`${path}\`"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the scheduled workflow active
+        if: steps.merge.outputs.changed == 'false' && steps.merge.outputs.blocked != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          last_commit_epoch="$(git log -1 --format=%ct)"
+          current_epoch="$(date +%s)"
+          keepalive_after_seconds=$((45 * 24 * 60 * 60))
+          if (( current_epoch - last_commit_epoch < keepalive_after_seconds )); then
+            echo "Repository activity is recent; no keepalive commit is needed."
+            exit 0
+          fi
+          git commit --allow-empty -m "chore: keep upstream sync active"
+          git push origin HEAD:main
+
+      - name: Install pinned XcodeGen
+        if: steps.merge.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 3 --retry-delay 2 --retry-all-errors -fsSL -o "$RUNNER_TEMP/xcodegen.zip" \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen-dist"
+          sudo "$RUNNER_TEMP/xcodegen-dist/xcodegen/install.sh" /usr/local
+          xcodegen --version
+
+      - name: Select Xcode 26
+        if: steps.merge.outputs.changed == 'true'
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app
+
+      - name: Generate the Xcode project
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: iosApp
+        run: xcodegen generate
+
+      - name: Build iOS without signing
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: iosApp
+        run: |
+          xcodebuild build \
+            -project Silo.xcodeproj \
+            -scheme Silo \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-iOS" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Build tvOS without signing
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: iosApp
+        run: |
+          xcodebuild build \
+            -project Silo.xcodeproj \
+            -scheme SiloTV \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-tvOS" \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Advance fork main after validation
+        if: steps.merge.outputs.changed == 'true'
+        shell: bash
+        env:
+          EXPECTED_BASE_SHA: ${{ steps.merge.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          current_main_sha="$(git rev-parse origin/main)"
+          if [[ "$current_main_sha" != "$EXPECTED_BASE_SHA" ]]; then
+            echo "::warning title=Fork main moved during validation::The validated merge was not pushed. A later run will retry against the new main branch."
+            {
+              echo "## Upstream sync deferred"
+              echo
+              echo "The fork's \`main\` branch changed while validation was running, so this run did not overwrite it."
+              echo "A later scheduled run will retry from the new head."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git push origin HEAD:main
+
+      - name: Summarize a failed sync
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Upstream sync failed"
+            echo
+            echo "The fork's main branch was left unchanged. Review the failed step in this run."
+          } >> "$GITHUB_STEP_SUMMARY"

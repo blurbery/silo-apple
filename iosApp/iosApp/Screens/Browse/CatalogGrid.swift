@@ -7,10 +7,14 @@ struct CatalogGrid: View {
     let items: [BrowseItem]
     let isLoading: Bool
     let hasMore: Bool
-    let onItemTap: (String) -> Void
+    let onItemTap: (BrowseItem) -> Void
     let onLoadMore: () -> Void
     @Environment(AppRouter.self) private var router
     @State private var uiCustomization = UICustomizationPreferences.shared
+    #if !os(tvOS)
+    @State private var detailBrowseOriginID = UUID().uuidString
+    @State private var detailBrowseSource: ItemDetailBrowseSource?
+    #endif
 
     #if os(tvOS)
     private var columns: [GridItem] {
@@ -45,7 +49,7 @@ struct CatalogGrid: View {
                     year: item.year,
                     userState: item.userState,
                     overlayData: OverlayData.from(item),
-                    action: { onItemTap(item.contentId) },
+                    action: { onItemTap(item) },
                     playAction: playAction(for: item),
                     contentId: item.contentId,
                     aspect: item.isAudiobook ? .square : .poster
@@ -58,6 +62,16 @@ struct CatalogGrid: View {
                 }
             }
         }
+        #if !os(tvOS)
+        .scrollTargetLayout()
+        .environment(\.itemDetailBrowseSource, detailBrowseSource)
+        .onChange(of: items.map(\.contentId), initial: true) { _, contentIDs in
+            detailBrowseSource = ItemDetailBrowseSource(
+                originID: detailBrowseOriginID,
+                contentIDs: contentIDs
+            )
+        }
+        #endif
 
         if isLoading {
             HStack {
