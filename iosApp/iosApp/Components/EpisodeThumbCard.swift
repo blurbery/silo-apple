@@ -11,12 +11,20 @@ struct EpisodeThumbCard: View {
     let item: SectionItem
     var showProgress: Bool = false
     let action: () -> Void
+    /// Some hosts use thumbnail taps for an immediate action rather than
+    /// opening detail. Player "On Deck" is the concrete case: selecting a
+    /// card must start that episode. Ordinary Home and browse thumbnails keep
+    /// the source-aware detail-card presentation.
+    var usesProvidedTapAction: Bool = false
     /// tvOS-only shortcut invoked by the remote's Play/Pause button while
     /// this card owns focus. Select continues to invoke `action`.
     var playAction: (() -> Void)? = nil
     /// tvOS-only: parent row's focus tracking binding. See
     /// `MediaCard.focusedItemId` for the contract.
     var focusedItemId: FocusState<String?>.Binding? = nil
+    var contextPlayTitle: String? = nil
+    var contextDetailTitle: String? = nil
+    var onOpenContextDetail: (() -> Void)? = nil
     var onRemoveFromContinueWatching: (() -> Void)? = nil
     var onSetWatched: ((Bool) async -> Bool)? = nil
 
@@ -25,6 +33,7 @@ struct EpisodeThumbCard: View {
     @EnvironmentObject private var overlayStore: OverlayPrefsStore
     #if os(tvOS)
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var continueWatchingMetadata = TVContinueWatchingPlaybackMetadataStore.shared
     #endif
     /// iOS 26 zoom transition namespace, shared from `MainTabView`. Lets the
     /// tapped thumbnail act as the `.matchedTransitionSource` for the zoom into
@@ -88,6 +97,10 @@ struct EpisodeThumbCard: View {
         .onChange(of: item.userState?.played) { _, _ in
             playedOverride = nil
         }
+        .task(id: continueWatchingMetadataTaskId) {
+            guard onRemoveFromContinueWatching != nil else { return }
+            _ = await continueWatchingMetadata.load(item: item)
+        }
         #else
         Group {
             if hasContextActions {
@@ -108,11 +121,15 @@ struct EpisodeThumbCard: View {
     #if !os(tvOS)
     private var iosButton: some View {
         Button {
-            router.pendingZoomSourceID = zoomInstanceID.uuidString
-            router.presentItemDetail(
-                contentId: item.contentId,
-                browseSource: detailBrowseSource
-            )
+            if usesProvidedTapAction {
+                action()
+            } else {
+                router.pendingZoomSourceID = zoomInstanceID.uuidString
+                router.presentItemDetail(
+                    contentId: item.contentId,
+                    browseSource: detailBrowseSource
+                )
+            }
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 thumbnail
@@ -166,7 +183,7 @@ struct EpisodeThumbCard: View {
             // collide with the S/E text + progress bar.
             if overlayStore.enabled {
                 CardOverlays(
-                    data: OverlayData.from(item),
+                    data: resolvedOverlayData,
                     prefs: overlayStore.prefs,
                     variant: .wide
                 )
@@ -225,6 +242,20 @@ struct EpisodeThumbCard: View {
 
     private var isPlayed: Bool {
         playedOverride ?? (item.userState?.played == true)
+    }
+
+    private var resolvedOverlayData: OverlayData {
+        #if os(tvOS)
+        if onRemoveFromContinueWatching != nil,
+           let presentation = continueWatchingMetadata.presentation(for: item.contentId) {
+            return presentation.overlayData
+        }
+        #endif
+        return OverlayData.from(item)
+    }
+
+    private var continueWatchingMetadataTaskId: String {
+        "\(item.contentId)#\(item.progressUpdatedAt ?? "")#\(onRemoveFromContinueWatching != nil)"
     }
 
     // MARK: - Derived data
@@ -366,11 +397,26 @@ struct EpisodeThumbCard: View {
     #endif
 
     private var hasContextActions: Bool {
-        onSetWatched != nil || onRemoveFromContinueWatching != nil
+        (contextPlayTitle != nil && playAction != nil)
+            || onOpenContextDetail != nil
+            || onSetWatched != nil
+            || onRemoveFromContinueWatching != nil
     }
 
     @ViewBuilder
     private var contextActions: some View {
+        if let contextPlayTitle, let playAction {
+            Button(action: playAction) {
+                Label(contextPlayTitle, systemImage: "play.fill")
+            }
+        }
+
+        if let contextDetailTitle, let onOpenContextDetail {
+            Button(action: onOpenContextDetail) {
+                Label(contextDetailTitle, systemImage: "info.circle")
+            }
+        }
+
         if let onSetWatched {
             Button {
                 let played = !isPlayed

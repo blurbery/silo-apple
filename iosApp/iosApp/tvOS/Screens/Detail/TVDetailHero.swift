@@ -1,5 +1,7 @@
 #if os(tvOS)
 import SwiftUI
+import Nuke
+import NukeUI
 
 /// Shared 1920×1080 detail metrics. These are deliberately separate from the
 /// root Skyline metrics: the detail experience has its own approved rhythm,
@@ -41,7 +43,8 @@ struct TVDetailPageSurface<Content: View>: View {
             if let cached = HeroBackdropPalette.cachedTint(for: url) {
                 sampledTint = cached
             }
-            if let tint = await HeroBackdropPalette.tintColor(for: url) {
+            if let tint = await HeroBackdropPalette.tintColor(for: url),
+               !Task.isCancelled {
                 sampledTint = tint
             }
         }
@@ -63,6 +66,7 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
     let seriesTitle: String?
     let logoUrl: String?
     let backdropUrl: String?
+    let backdropThumbhash: String?
     /// Optional short editorial line placed in a capsule above the title
     /// (e.g. "New Episode Friday", "Continuing Series"). Hidden when nil.
     let eyebrow: String?
@@ -80,48 +84,100 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
     /// Optional "Starring A, B, C" line floated on the right of the hero
     /// at mid-height. Hidden when nil.
     let starringText: String?
-    /// Optional, non-interactive playback readout shown directly below the
-    /// credits. Series overview uses this to disclose the remembered version
-    /// that Play will launch without adding a second selector to the page.
-    let playbackSummaryText: String?
+    /// Non-interactive playback readout shown directly below the credits. It
+    /// reserves a stable slot while an episode's playback detail is loading,
+    /// so changing carousel focus never moves the persistent action row.
+    let playbackSummary: TVPlaybackSelectionSummary
+    /// A compact editorial header can retain the standard Movie backdrop
+    /// geometry independently of its own layout height. Nil keeps both heights
+    /// coupled, which is the default behavior for every other detail page.
+    var backdropHeight: CGFloat? = nil
+    var heroHeight: CGFloat = TVDetailLayout.heroHeight
+    var heroTopInset: CGFloat = TVDetailLayout.heroTopInset
+    /// Episode mode narrows only the editorial column. The logo keeps the
+    /// same leading/top anchor while long episode copy wraps before it reaches
+    /// the backdrop subject.
+    var editorialContentWidth: CGFloat = TVDetailLayout.heroContentWidth
+    /// Optional fixed footprint for the complete editorial stack. Series uses
+    /// this to keep the action row on one baseline in Show and Season modes;
+    /// changing episode text may never reflow the controls below it.
+    var editorialReservedHeight: CGFloat? = nil
+    /// Fixed metadata slot used by Series because Show facts and episode facts
+    /// have different intrinsic widths and availability.
+    var metadataReservedHeight: CGFloat = 0
+    /// Reserves a stable synopsis footprint while adjacent episodes swap in.
+    /// This keeps the selector and season tabs from moving when summaries have
+    /// different lengths.
+    var synopsisReservedHeight: CGFloat = 0
+    /// Keeps the playback summary on one baseline whether the Show credit is
+    /// present or the focused episode has no credit of its own.
+    var creditReservedHeight: CGFloat = 0
+    /// Vertical distance between editorial metadata and the hero controls.
+    /// Series tightens this inside its fixed hero so Seasons gains clearance
+    /// without moving the episode carousel down.
+    var actionSpacing: CGFloat = 18
+    /// Series keeps its compact layout but lets the standard Movie
+    /// backdrop fade finish behind the season row. Movies retain the existing
+    /// clipped hero through the default.
+    var extendsBackdropFadeBelowHero = false
     @ViewBuilder let actions: () -> Actions
     /// Affordance rendered directly under the synopsis (e.g. the on-view
     /// description-translation control). Pass `{ EmptyView() }` when there's
     /// nothing to show.
     @ViewBuilder let belowSynopsis: () -> BelowSynopsis
 
+    @ViewBuilder
     var body: some View {
+        if extendsBackdropFadeBelowHero {
+            heroComposition
+        } else {
+            heroComposition.clipped()
+        }
+    }
+
+    private var heroComposition: some View {
         ZStack(alignment: .topLeading) {
             backdrop
             content
         }
-        .frame(height: TVDetailLayout.heroHeight)
+        .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
-        .clipped()
     }
 
     // MARK: - Backdrop
 
     private var backdrop: some View {
         GeometryReader { geometry in
+            let resolvedBackdropHeight = backdropHeight ?? heroHeight
             let artworkWidth = geometry.size.width * 0.64
             let artworkHeight = min(
-                TVDetailLayout.heroHeight * 0.94,
+                resolvedBackdropHeight * 0.94,
                 artworkWidth * 9 / 16
             )
+            // The standard Movie mask is shared verbatim. A compact Series
+            // header only changes whether that completed fade may draw beyond
+            // the editorial layout boundary.
+            let bottomFadeEnd: CGFloat = 1
+            let bottomFadeStart = max(0, bottomFadeEnd - 0.30)
 
             if let url = backdropUrl, !url.isEmpty {
                 CachedAsyncImage(
                     url: url,
                     targetSize: CGSize(width: artworkWidth, height: artworkHeight),
+                    thumbhash: backdropThumbhash,
                     contentMode: .fill
                 )
                 .frame(width: artworkWidth, height: artworkHeight)
                 .clipped()
-                .mask { artworkFadeMask }
+                .mask {
+                    artworkFadeMask(
+                        bottomFadeStart: bottomFadeStart,
+                        bottomFadeEnd: bottomFadeEnd
+                    )
+                }
                 .frame(
                     width: geometry.size.width,
-                    height: TVDetailLayout.heroHeight,
+                    height: resolvedBackdropHeight,
                     alignment: .topTrailing
                 )
             }
@@ -130,7 +186,10 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
 
     /// The image is crisp in the top-right and dissolves into the solid page
     /// tint on its leading and lower edges. No blur or translucent material.
-    private var artworkFadeMask: some View {
+    private func artworkFadeMask(
+        bottomFadeStart: CGFloat,
+        bottomFadeEnd: CGFloat
+    ) -> some View {
         LinearGradient(
             stops: [
                 .init(color: .black, location: 0.0),
@@ -144,8 +203,8 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
             LinearGradient(
                 stops: [
                     .init(color: .black, location: 0.0),
-                    .init(color: .black, location: 0.70),
-                    .init(color: .clear, location: 1.0),
+                    .init(color: .black, location: bottomFadeStart),
+                    .init(color: .clear, location: max(0.72, bottomFadeEnd)),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -156,8 +215,8 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
     // MARK: - Content column
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            editorialColumn
+        VStack(alignment: .leading, spacing: actionSpacing) {
+            reservedEditorialColumn
 
             // Give the action cluster the full hero width with leading
             // content (instead of `HStack { actions(); Spacer() }`) so the
@@ -171,44 +230,139 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .focusSection()
         }
-        .padding(.top, TVDetailLayout.heroTopInset)
+        .padding(.top, heroTopInset)
         .padding(.horizontal, TVDetailLayout.horizontalInset)
         .frame(
             maxWidth: .infinity,
-            maxHeight: TVDetailLayout.heroHeight,
+            maxHeight: heroHeight,
             alignment: .topLeading
         )
     }
 
+    @ViewBuilder
+    private var reservedEditorialColumn: some View {
+        if let editorialReservedHeight {
+            ZStack(alignment: .topLeading) {
+                editorialPrimaryInformationColumn
+                    .frame(
+                        height: max(
+                            0,
+                            editorialReservedHeight
+                                - fixedDisclosureReservedHeight
+                                - fixedDisclosureSpacing
+                        ),
+                        alignment: .topLeading
+                    )
+                    .clipped()
+
+                // The episode credit and playback readout are one bottom-locked
+                // disclosure block. Different synopsis lengths can no longer
+                // move Starring, Version, Audio, Subtitles, or the action row.
+                fixedDisclosureColumn
+                    .frame(
+                        width: editorialContentWidth,
+                        height: editorialReservedHeight,
+                        alignment: .bottomLeading
+                    )
+            }
+            .frame(
+                width: editorialContentWidth,
+                height: editorialReservedHeight,
+                alignment: .topLeading
+            )
+            .clipped()
+        } else {
+            editorialColumn
+        }
+    }
+
     private var editorialColumn: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            editorialPrimaryInformationColumn
+            creditBlock
+            TVPlaybackSelectionSummaryView(summary: playbackSummary)
+        }
+        .frame(maxWidth: editorialContentWidth, alignment: .leading)
+    }
+
+    private var editorialPrimaryInformationColumn: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let eyebrow, !eyebrow.isEmpty {
                 TVHeroEyebrow(text: eyebrow)
             }
             titleBlock
                 .padding(.top, eyebrow == nil ? 0 : 2)
-            metadataBlock
-            if let overview, !overview.isEmpty {
-                TVExpandableSynopsis(overview: overview)
-            }
+            reservedMetadataBlock
+            synopsisBlock
             belowSynopsis()
-            if let starringText, !starringText.isEmpty {
-                heroCredit(starringText)
-            }
-            if let playbackSummaryText, !playbackSummaryText.isEmpty {
-                Text(playbackSummaryText)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(Color.white.opacity(0.62))
-                    .lineLimit(1)
-                    .contentTransition(.opacity)
-                    .animation(
-                        .easeInOut(duration: ContinuumTheme.fastDuration),
-                        value: playbackSummaryText
-                    )
-                    .accessibilityLabel("Playback: \(playbackSummaryText)")
-            }
         }
-        .frame(maxWidth: TVDetailLayout.heroContentWidth, alignment: .leading)
+        .frame(maxWidth: editorialContentWidth, alignment: .leading)
+    }
+
+    private var fixedDisclosureColumn: some View {
+        VStack(alignment: .leading, spacing: creditSummarySpacing) {
+            creditBlock
+            TVPlaybackSelectionSummaryView(summary: playbackSummary)
+                .frame(
+                    height: playbackSummaryReservedHeight,
+                    alignment: .topLeading
+                )
+        }
+        // Episode focus can replace all four strings in one model update. This
+        // block is intentionally static: values change in place without an
+        // inherited layout animation that makes the rows appear to bounce.
+        .transaction { transaction in
+            transaction.animation = nil
+            transaction.disablesAnimations = true
+        }
+    }
+
+    private var playbackSummaryReservedHeight: CGFloat { 44 }
+    private var creditSummarySpacing: CGFloat { creditReservedHeight > 0 ? 8 : 0 }
+    private var fixedDisclosureReservedHeight: CGFloat {
+        creditReservedHeight + creditSummarySpacing + playbackSummaryReservedHeight
+    }
+    private var fixedDisclosureSpacing: CGFloat { 4 }
+
+    @ViewBuilder
+    private var reservedMetadataBlock: some View {
+        if metadataReservedHeight > 0 {
+            metadataBlock
+                .frame(height: metadataReservedHeight, alignment: .leading)
+                .clipped()
+        } else {
+            metadataBlock
+        }
+    }
+
+    @ViewBuilder
+    private var synopsisBlock: some View {
+        if synopsisReservedHeight > 0 {
+            Group {
+                if let overview, !overview.isEmpty {
+                    TVExpandableSynopsis(overview: overview)
+                }
+            }
+            .frame(height: synopsisReservedHeight, alignment: .topLeading)
+            .clipped()
+        } else if let overview, !overview.isEmpty {
+            TVExpandableSynopsis(overview: overview)
+        }
+    }
+
+    @ViewBuilder
+    private var creditBlock: some View {
+        if creditReservedHeight > 0 {
+            Group {
+                if let starringText, !starringText.isEmpty {
+                    heroCredit(starringText)
+                }
+            }
+            .frame(height: creditReservedHeight, alignment: .leading)
+            .clipped()
+        } else if let starringText, !starringText.isEmpty {
+            heroCredit(starringText)
+        }
     }
 
     @ViewBuilder
@@ -219,17 +373,15 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
                 episodeTitle: title,
                 logoUrl: logoUrl
             )
-        } else if let logoUrl, !logoUrl.isEmpty {
-            CachedAsyncImage(
-                url: logoUrl,
-                contentMode: .fit,
-                alignment: .bottomLeading,
-                placeholderStyle: .clear
-            )
-                .frame(maxWidth: 650, maxHeight: 160, alignment: .bottomLeading)
-                .accessibilityLabel(title)
         } else {
-            TVHeroTitle(title: title)
+            TVDecodedLogoTitle(
+                logoUrl: logoUrl,
+                accessibilityLabel: title,
+                maxWidth: 650,
+                maxHeight: 160
+            ) {
+                TVHeroTitle(title: title)
+            }
         }
     }
 
@@ -416,6 +568,84 @@ private struct TVHeroTitle: View {
     }
 }
 
+/// Keeps the text identity on screen until server logo artwork has actually
+/// decoded. A prefetched logo is seeded synchronously so warm detail entry does
+/// not paint one intermediate frame of text before showing the finished art.
+struct TVDecodedLogoTitle<Fallback: View>: View {
+    let logoUrl: String?
+    let accessibilityLabel: String
+    let maxWidth: CGFloat
+    let maxHeight: CGFloat
+    @ViewBuilder let fallback: () -> Fallback
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(
+        logoUrl: String?,
+        accessibilityLabel: String,
+        maxWidth: CGFloat,
+        maxHeight: CGFloat,
+        @ViewBuilder fallback: @escaping () -> Fallback
+    ) {
+        self.logoUrl = logoUrl
+        self.accessibilityLabel = accessibilityLabel
+        self.maxWidth = maxWidth
+        self.maxHeight = maxHeight
+        self.fallback = fallback
+    }
+
+    @ViewBuilder
+    var body: some View {
+        Group {
+            if let normalizedLogoURL {
+                let request = ImageRequest(url: normalizedLogoURL)
+                let cachedImage = ImagePipeline.shared.cache[request]?.image
+                LazyImage(
+                    request: request,
+                    transaction: Transaction(
+                        animation: reduceMotion || cachedImage != nil
+                            ? nil
+                            : .easeInOut(duration: 0.2)
+                    )
+                ) { state in
+                    if let image = state.image {
+                        renderedLogo(image)
+                            .transition(reduceMotion ? .identity : .opacity)
+                    } else if let cachedImage {
+                        renderedLogo(Image(platformImage: cachedImage))
+                    } else {
+                        fallback()
+                    }
+                }
+            } else {
+                fallback()
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var normalizedLogoURL: URL? {
+        guard let normalized = logoUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalized.isEmpty else {
+            return nil
+        }
+        return URL(string: normalized)
+    }
+
+    private func renderedLogo(_ image: Image) -> some View {
+        image
+            .resizable()
+            .aspectRatio(contentMode: .fit)
+            .frame(
+                maxWidth: maxWidth,
+                maxHeight: maxHeight,
+                alignment: .bottomLeading
+            )
+            .accessibilityHidden(true)
+    }
+}
+
 private struct TVEpisodeHierarchyTitle: View {
     let seriesTitle: String
     let episodeTitle: String
@@ -423,16 +653,12 @@ private struct TVEpisodeHierarchyTitle: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let logoUrl, !logoUrl.isEmpty {
-                CachedAsyncImage(
-                    url: logoUrl,
-                    contentMode: .fit,
-                    alignment: .bottomLeading,
-                    placeholderStyle: .clear
-                )
-                    .frame(maxWidth: 650, maxHeight: 140, alignment: .bottomLeading)
-                    .accessibilityLabel(seriesTitle)
-            } else {
+            TVDecodedLogoTitle(
+                logoUrl: logoUrl,
+                accessibilityLabel: seriesTitle,
+                maxWidth: 650,
+                maxHeight: 140
+            ) {
                 Text(seriesTitle.uppercased())
                     .font(seriesFont)
                     .foregroundColor(.white)
@@ -612,7 +838,6 @@ enum TVHeroMetadata {
             guard !directors.isEmpty else { return nil }
             return "Directed by " + directors.prefix(2).joined(separator: ", ")
         }
-        if detail.type == "episode" { return nil }
         guard let cast = detail.cast, !cast.isEmpty else { return nil }
         let names = cast.prefix(3).map(\.name)
         guard !names.isEmpty else { return nil }
@@ -704,6 +929,76 @@ enum TVHeroMetadata {
             return "\(minutes / 60)h \(minutes % 60)m"
         }
         return "\(minutes) min"
+    }
+}
+
+/// Fixed-width readout matching the Android TV detail branch. Labels stay in
+/// place and unresolved values render quiet skeletons while the newly focused
+/// episode's playback detail arrives.
+private struct TVPlaybackSelectionSummaryView: View {
+    let summary: TVPlaybackSelectionSummary
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            summaryItem(
+                label: "VERSION",
+                value: summary.version,
+                slotWidth: 245,
+                placeholderWidth: 100
+            )
+            summaryItem(
+                label: "AUDIO",
+                value: summary.audio,
+                slotWidth: 285,
+                placeholderWidth: 130
+            )
+            summaryItem(
+                label: "SUBTITLES",
+                value: summary.subtitles,
+                slotWidth: 264,
+                placeholderWidth: 60
+            )
+        }
+        // This matches the compact no-Restart action-row footprint. Starts stay
+        // fixed between episodes, while unusually long values scale down inside
+        // their own slot instead of wrapping or extending into the artwork.
+        .frame(width: 810, height: 44, alignment: .topLeading)
+    }
+
+    private func summaryItem(
+        label: String,
+        value: String?,
+        slotWidth: CGFloat,
+        placeholderWidth: CGFloat
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .font(.system(size: 18, weight: .bold))
+                .tracking(0.9)
+                .foregroundColor(Color.white.opacity(0.48))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+
+            Group {
+                if let value {
+                    Text(value)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(Color.white.opacity(0.82))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .allowsTightening(true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color.white.opacity(0.14))
+                        .frame(width: placeholderWidth, height: 14)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .frame(width: slotWidth, height: 44, alignment: .topLeading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label.capitalized), \(value ?? "loading")")
     }
 }
 #endif

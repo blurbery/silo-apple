@@ -132,11 +132,12 @@ struct FavoritesView: View {
     @State private var uiCustomization = UICustomizationPreferences.shared
     #if os(tvOS)
     @State private var selectedSection: FavoriteMediaSection = .movies
-    #elseif os(iOS)
-    @State private var selectedSection: IOSPersonalMediaSection = .movies
     #endif
     @Environment(AppRouter.self) private var router
     @Environment(\.horizontalSizeClass) private var hSize
+    #if os(iOS)
+    @State private var selectedSection: IOSPersonalMediaSection = .movies
+    #endif
 
     private var columns: [GridItem] {
         #if os(tvOS)
@@ -160,10 +161,49 @@ struct FavoritesView: View {
         self.showsNavigationTitle = showsNavigationTitle
     }
 
+    #if os(iOS)
+    private var iosGridContent: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                IOSPersonalMediaSectionPicker(selection: $selectedSection)
+
+                if filteredIOSItems.isEmpty {
+                    iosSelectedSectionEmptyState
+                } else {
+                    IOSPersonalMediaCarouselRows(items: filteredIOSItems) { item, state in
+                        guard !state.isFavorite else { return }
+                        withAnimation {
+                            items.removeAll { $0.contentId == item.contentId }
+                        }
+                    }
+                }
+            }
+            .padding(ContinuumTheme.padding)
+        }
+    }
+
+    private var filteredIOSItems: [BrowseItem] {
+        items.filter(selectedSection.includes)
+    }
+
+    private var iosSelectedSectionEmptyState: some View {
+        ContentUnavailableView(
+            "No Favorite \(selectedSection.rawValue)",
+            systemImage: selectedSection == .movies ? "film" : "tv",
+            description: Text("Add favorites from a detail page and they will appear here.")
+        )
+        .frame(maxWidth: .infinity, minHeight: 360)
+    }
+    #endif
+
     var body: some View {
         Group {
             if !items.isEmpty {
+                #if os(iOS)
+                iosGridContent
+                #else
                 gridContent
+                #endif
             } else if let error {
                 ErrorView(state: error, onRetry: { Task { await loadFavorites() } })
             } else if isLoading {
@@ -196,24 +236,6 @@ struct FavoritesView: View {
     private var gridContent: some View {
         #if os(tvOS)
         tvGridContent
-        #elseif os(iOS)
-        ScrollView {
-            VStack(spacing: 16) {
-                IOSPersonalMediaSectionPicker(selection: $selectedSection)
-
-                if filteredIOSItems.isEmpty {
-                    iosSelectedSectionEmptyState
-                } else {
-                    IOSPersonalMediaCarouselRows(items: filteredIOSItems) { item, state in
-                        guard !state.isFavorite else { return }
-                        withAnimation {
-                            items.removeAll { $0.contentId == item.contentId }
-                        }
-                    }
-                }
-            }
-            .padding(ContinuumTheme.padding)
-        }
         #else
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
@@ -226,8 +248,9 @@ struct FavoritesView: View {
                         userState: item.userState,
                         overlayData: OverlayData.from(item),
                         action: {
-                            router.navigate(to: .itemDetail(contentId: item.contentId))
+                            router.navigate(to: .itemDetail(browseItem: item))
                         },
+                        playAction: playAction(for: item),
                         contentId: item.contentId,
                         onUserStateChanged: { state in
                             guard !state.isFavorite else { return }
@@ -243,27 +266,6 @@ struct FavoritesView: View {
         }
         #endif
     }
-
-    #if os(iOS)
-    private var filteredIOSItems: [BrowseItem] {
-        items.filter(selectedSection.includes)
-    }
-
-    private var iosSelectedSectionEmptyState: some View {
-        ContentUnavailableView(
-            "No Favorite \(selectedSection.rawValue)",
-            systemImage: selectedSection == .movies ? "film" : "tv",
-            description: Text("Add favorites from a detail page and they will appear here.")
-        )
-        .frame(maxWidth: .infinity, minHeight: 360)
-    }
-    #elseif os(macOS)
-    private var filteredIOSItems: [BrowseItem] { items }
-
-    private var iosSelectedSectionEmptyState: some View {
-        EmptyView()
-    }
-    #endif
 
     #if os(tvOS)
     private var filteredItems: [BrowseItem] {
@@ -344,7 +346,7 @@ struct FavoritesView: View {
             userState: item.userState,
             overlayData: OverlayData.from(item),
             action: {
-                router.navigate(to: .itemDetail(contentId: item.contentId))
+                router.navigate(to: .itemDetail(browseItem: item))
             },
             playAction: playAction(for: item),
             contentId: item.contentId,

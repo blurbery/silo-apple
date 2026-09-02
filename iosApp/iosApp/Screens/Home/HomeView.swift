@@ -23,6 +23,9 @@ func dispatchFeaturedHeroPlay(
 /// full-bleed spotlight, while tvOS keeps its existing Skyline focus marquee.
 struct HomeView: View {
     var homeFocusRequest: Int = 0
+    /// tvOS-only: a pushed detail page has popped and Home should restore the
+    /// exact card/row that launched it instead of leaving the focus graph empty.
+    var detailReturnFocusRequest: Int = 0
     /// tvOS-only: whether the custom top menu holds focus. Deferred entry
     /// claims are dropped while the user is up in the menu so late data
     /// loads never yank focus.
@@ -30,6 +33,9 @@ struct HomeView: View {
     var onTopMenuFocusRequest: (() -> Void)? = nil
 
     @State private var viewModel = HomeViewModel()
+    #if os(tvOS)
+    @State private var homeSectionPreferences = HomeSectionPreferences.shared
+    #endif
     #if !os(tvOS)
     @State private var homeSectionPreferences = HomeSectionPreferences.shared
     @State private var currentProfile: UserProfile?
@@ -72,18 +78,28 @@ struct HomeView: View {
             if !displayedSections.isEmpty {
                 TVSkylineSectionFeed(
                     sections: displayedSections,
-                    contentVerticalOffset: 56,
                     focusRequest: homeFocusRequest,
+                    detailReturnFocusRequest: detailReturnFocusRequest,
                     isTopMenuFocused: isTopMenuFocused,
                     onTopMenuFocusRequest: onTopMenuFocusRequest,
-                    onItemTap: { navigateToDetail($0) },
+                    onItemTap: navigateToDetail,
                     onRemoveFromContinueWatching: dismissContinueWatching,
                     onSetWatched: setWatched
                 )
+                // Preference edits replace the row band as one stable unit:
+                // the next visible row takes the vacated slot at the fixed
+                // first-row anchor, and no marquee from a hidden row lingers.
+                .id(homeSectionPreferences.layoutRevision)
             } else if let error = viewModel.error {
                 ErrorView(state: error, onRetry: { Task { await viewModel.loadSections() } })
             } else if viewModel.isLoading {
                 Color.clear
+            } else if !viewModel.regularSections.isEmpty {
+                EmptyStateView(
+                    icon: "eye.slash",
+                    title: "Home sections are hidden",
+                    subtitle: "Choose which rows appear in Settings → General → Home Sections."
+                )
             } else {
                 EmptyStateView(
                     icon: "play.rectangle.on.rectangle",
@@ -94,6 +110,7 @@ struct HomeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
+            homeSectionPreferences.refresh()
             await viewModel.loadSections()
         }
         .onAppear {
@@ -234,8 +251,27 @@ struct HomeView: View {
                     #if os(iOS)
                     homeScrollIdentityHeader
                         .id(HomeFocusTarget.topSpacer)
+
+                    if let featured = viewModel.featuredSection {
+                        MobileFeaturedHero(
+                            items: featured.items,
+                            onPlay: playFeaturedItem,
+                            onInfo: { item in
+                                navigateToDetail(item.contentId, item)
+                            }
+                        )
+                        // The spotlight already fades to the page background;
+                        // cancel the stack gap so the first row grows out of
+                        // that fade instead of exposing a straight seam.
+                        .padding(.bottom, -HomeFeedMetrics.sectionSpacing)
+                        .id(HomeFocusTarget.featured)
+                    }
                     #else
-                    topRunway(topSafeAreaInset: geometry.safeAreaInsets.top)
+                    // Preserve the existing non-iOS runway while the iOS
+                    // wordmark becomes part of the scrolling feed.
+                    Color.clear
+                        .frame(height: topRunwaySpacing(topSafeAreaInset: geometry.safeAreaInsets.top))
+                        .id(HomeFocusTarget.topSpacer)
                     #endif
 
                     ForEach(displayedSections) { section in
@@ -260,11 +296,6 @@ struct HomeView: View {
         }
     }
 
-    private func topRunway(topSafeAreaInset: CGFloat) -> some View {
-        Color.clear
-            .frame(height: topRunwaySpacing(topSafeAreaInset: topSafeAreaInset))
-            .id(HomeFocusTarget.topSpacer)
-    }
     #endif
 
     private enum HomeFocusTarget: Hashable {
@@ -276,17 +307,22 @@ struct HomeView: View {
     /// Rows for the vertical list, in server Home order after filtering empty
     /// and featured sections. Recommendations stay in the For You tab.
     private var displayedSections: [ResolvedSection] {
-        #if os(tvOS)
-        return viewModel.regularSections
-        #elseif os(macOS)
-        return viewModel.sections.filter { !$0.items.isEmpty }
-        #else
+        #if os(tvOS) || os(iOS)
+        // Filter before the Skyline feed performs layout. A hidden section
+        // therefore leaves no placeholder: the next visible section inherits
+        // the same fixed row slot and vertical anchor.
         return homeSectionPreferences.arrangedSections(viewModel.regularSections)
+        #else
+        return viewModel.regularSections
         #endif
     }
 
     private var hasHomeContent: Bool {
+        #if os(iOS)
+        return viewModel.featuredSection != nil || !displayedSections.isEmpty
+        #else
         return !displayedSections.isEmpty
+        #endif
     }
 
     #if !os(tvOS)
@@ -466,8 +502,13 @@ struct HomeView: View {
 
     // MARK: - Navigation
 
-    private func navigateToDetail(_ contentId: String) {
-        router.navigate(to: .itemDetail(contentId: contentId))
+    private func navigateToDetail(_ destinationContentId: String, _ item: SectionItem) {
+        router.navigate(
+            to: .itemDetail(
+                destinationContentId: destinationContentId,
+                sectionItem: item
+            )
+        )
     }
 
     #if os(iOS)
@@ -483,7 +524,9 @@ struct HomeView: View {
                     backdropURL: playableItem.backdropUrl
                 )
             },
-            onInfo: { navigateToDetail($0.contentId) }
+            onInfo: { item in
+                navigateToDetail(item.contentId, item)
+            }
         )
     }
     #endif

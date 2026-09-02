@@ -7,11 +7,12 @@ import SwiftUI
 /// 10-foot layout.
 struct ItemDetailView: View {
     let contentId: String
+    var tvSeed: TVItemDetailRouteSeed? = nil
     var onClose: (() -> Void)? = nil
 
     var body: some View {
         #if os(tvOS)
-        TVItemDetailView(contentId: contentId)
+        TVItemDetailView(contentId: contentId, seed: tvSeed)
         #else
         ItemDetailPhoneContent(contentId: contentId, onClose: onClose)
         #endif
@@ -140,6 +141,7 @@ private struct ItemDetailPhoneContent: View {
             // keep running (and retaining the view model) after the route
             // pops. Same reasoning as `PersonDetailView.stopMetadataRefresh`.
             viewModel.stopTrailerFetch()
+            viewModel.stopEpisodePagePrefetch()
         }
         .onChange(of: router.presentedPlayer?.id) { oldValue, newValue in
             guard oldValue != nil, newValue == nil, refreshOnPlayerDismiss else { return }
@@ -494,9 +496,13 @@ private struct ItemDetailPhoneContent: View {
                 },
                 onPlayEpisode: { id, fileId, startFromBeginning in
                     let usesSelectedEpisodeControls = id == playbackEpisode(for: detail)?.contentId
+                    let episode = viewModel.episodes.first(where: { $0.contentId == id })
                     let resumePosition = startFromBeginning
                         ? nil
-                        : viewModel.episodes.first(where: { $0.contentId == id })?.userData?.positionSeconds
+                        : playableResumePosition(
+                            position: episode?.userData?.positionSeconds,
+                            duration: episode?.userData?.durationSeconds
+                        )
                     if usesSelectedEpisodeControls,
                        let fileId = nextUpPlaybackFileId(resolvedFileId: fileId) {
                         presentPlayerFromDetail(

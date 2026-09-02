@@ -171,6 +171,9 @@ class AppRouter {
         let subtitleTrackIndex: Int?
         let startFromBeginning: Bool
         let resumePosition: Double?
+        /// Continue Watching asks playback to prefer the exact last-used
+        /// source version over the profile's general automatic quality rule.
+        let prefersLastUsedVersion: Bool
         /// Optional detail destination to install behind the full-screen
         /// player once playback has actually started.
         let returnToContentId: String?
@@ -212,6 +215,7 @@ class AppRouter {
         subtitleTrackIndex: Int? = nil,
         startFromBeginning: Bool = false,
         resumePosition: Double? = nil,
+        prefersLastUsedVersion: Bool = false,
         returnToContentId: String? = nil,
         posterURL: String? = nil,
         backdropURL: String? = nil
@@ -249,6 +253,7 @@ class AppRouter {
             subtitleTrackIndex: subtitleTrackIndex,
             startFromBeginning: startFromBeginning,
             resumePosition: resumePosition,
+            prefersLastUsedVersion: prefersLastUsedVersion,
             returnToContentId: returnToContentId,
             posterURL: posterURL,
             backdropURL: backdropURL
@@ -287,6 +292,7 @@ class AppRouter {
             subtitleTrackIndex: nil,
             startFromBeginning: startFromBeginning,
             resumePosition: resumePosition,
+            prefersLastUsedVersion: false,
             returnToContentId: nil,
             offlineDownloadId: downloadId,
             posterURL: nil,
@@ -299,14 +305,16 @@ class AppRouter {
 
     /// Push a route onto the navigation stack.
     func navigate(to route: Route) {
-        recordScreenBreadcrumb(target: route.diagnosticsTarget, action: "navigate")
-
         #if os(iOS)
-        if case .itemDetail(let contentId) = route {
+        if case .itemDetail(let contentId, _) = route {
             presentItemDetail(contentId: contentId)
             return
         }
+        #endif
 
+        recordScreenBreadcrumb(target: route.diagnosticsTarget, action: "navigate")
+
+        #if os(iOS)
         // Person pages reached from Cast & Crew belong to the detail card's
         // navigation stack. Keeping them inside the sheet means Back returns to
         // the title the user opened instead of revealing an unrelated route that
@@ -330,6 +338,7 @@ class AppRouter {
         browseSource: ItemDetailBrowseSource? = nil
     ) {
         #if os(iOS)
+        recordScreenBreadcrumb(target: "itemDetail", action: "present")
         if presentedItemDetail == nil {
             let source = browseSource.flatMap { source in
                 source.contentIDs.contains(contentId) ? source : nil

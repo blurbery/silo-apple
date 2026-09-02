@@ -89,7 +89,7 @@ struct WatchlistView: View {
                         userState: item.userState,
                         overlayData: OverlayData.from(item),
                         action: {
-                            router.navigate(to: .itemDetail(contentId: item.contentId))
+                            router.navigate(to: .itemDetail(browseItem: item))
                         },
                         playAction: playAction(for: item),
                         contentId: item.contentId,
@@ -120,12 +120,6 @@ struct WatchlistView: View {
             description: Text("Add titles from a detail page and they will appear here.")
         )
         .frame(maxWidth: .infinity, minHeight: 360)
-    }
-    #else
-    private var filteredIOSItems: [BrowseItem] { items }
-
-    private var iosSelectedSectionEmptyState: some View {
-        EmptyView()
     }
     #endif
 

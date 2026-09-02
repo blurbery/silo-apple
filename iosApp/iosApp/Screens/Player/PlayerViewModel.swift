@@ -793,6 +793,9 @@ class PlayerViewModel {
         /// Explicit quality for this load (mid-stream quality-change replan);
         /// wins over `PlayerSettings.preferredQuality` in the bridge.
         var preferredQualityOverride: String? = nil
+        /// Continue Watching only: select the server's last-used source file
+        /// before applying the profile-wide automatic quality preference.
+        var prefersLastUsedVersion = false
 
         /// Rebuild a request for the same playback session while retaining the
         /// user's temporary quality choice. Recovery must not fall back to the
@@ -815,6 +818,7 @@ class PlayerViewModel {
                 preferredQualityOverride: preferredQualityOverride
             )
             request.preferredProtocolV3SubtitleIndex = preferredProtocolV3SubtitleIndex
+            request.prefersLastUsedVersion = prefersLastUsedVersion
             return request
         }
 
@@ -2499,7 +2503,7 @@ class PlayerViewModel {
 
     func playNextEpisodeNow() {
         guard let nextUpEpisode else { return }
-        let request = LoadRequest(
+        var request = LoadRequest(
             contentId: nextUpEpisode.contentId,
             preferredFileId: nil,
             preferredAudioTrackIndex: nil,
@@ -2507,12 +2511,29 @@ class PlayerViewModel {
             preferredSidecarSubtitleTrackId: nil,
             startFromBeginning: false
         )
+        request.preferredQualityOverride = nextEpisodeQualityOverride
         beginFreshLoad(
             request: request,
             progressPosition: completionProgressPositionForCurrentItem(),
             finalizeCurrentSession: true,
             origin: .autoplay
         )
+    }
+
+    /// File ids do not carry across episodes, but their effective quality can.
+    /// Preserve an explicit in-player rung; when playback is on Auto, carry
+    /// the source resolution Auto actually selected. The normal ranked
+    /// fallback remains in force if the next episode has no compatible match.
+    private var nextEpisodeQualityOverride: String? {
+        let active = ApplePlaybackQuality.protocolV3QualityId(activeQualityId)
+        if active != ApplePlaybackQuality.autoId {
+            return active
+        }
+        guard let resolution = currentSelectedVersion?.resolution,
+              !resolution.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return ApplePlaybackQuality.protocolV3QualityId(resolution)
     }
 
     func playOnDeckItemNow(_ item: PlayerOnDeckItem) {
@@ -2797,7 +2818,7 @@ class PlayerViewModel {
         let existingLiveTracks = subtitleTracks.filter {
             SubtitleTrackIdSpace.isAILive($0.trackId)
         }
-        audioTracks = engine.audioTracks.enumerated().map { ordinal, track in
+        let aetherAudioTracks = engine.audioTracks.enumerated().map { ordinal, track in
             PlayerTrack(
                 trackId: Int64(track.id),
                 kind: .audio,
@@ -2815,6 +2836,11 @@ class PlayerViewModel {
                 srcId: ordinal
             )
         }
+        audioTracks = ApplePlaybackV3PlanAdapter.audioPickerTracks(
+            aetherTracks: aetherAudioTracks,
+            plan: activePreparedProtocolV3?.plan,
+            version: currentSelectedVersion
+        )
         let aetherSubtitleTracks = engine.subtitleTracks.map { track in
             let appTrackID = aetherPlaybackController.appSubtitleID(forAetherID: track.id)
             return PlayerTrack(
@@ -2866,7 +2892,8 @@ class PlayerViewModel {
         }
         chapters = mediaChapters.isEmpty ? serverProvidedChapters : mediaChapters
 
-        selectedAudioId = engine.activeAudioTrackIndex.map(Int64.init)
+        selectedAudioId = audioTracks.first(where: \.isSelected)?.trackId
+            ?? engine.activeAudioTrackIndex.map(Int64.init)
         // A locally-registered sidecar is selected client-side, so the plan —
         // which predates the track — must not republish over it. Once the
         // server publishes that ordinal the plan is authoritative again.
@@ -2891,8 +2918,12 @@ class PlayerViewModel {
         // load is established; `loadAether` re-enters this method at that point.
         let loadIsEstablished = isAetherLoadEstablished
 
+        // Catalog fallback rows are picker state for server-owned replans; only
+        // a track Aether actually published may drive its local selection API.
         if let wantedIndex = pendingAudioFfIndex,
-           let match = audioTracks.first(where: { audioSelectionIndex(for: $0) == wantedIndex }) {
+           let match = aetherAudioTracks.first(where: {
+               audioSelectionIndex(for: $0) == wantedIndex
+           }) {
             switch DeferredTrackSelectionGate.outcome(
                 isLoadEstablished: loadIsEstablished,
                 engineAlreadyMatches: engine.activeAudioTrackIndex.map(Int64.init) == match.trackId
@@ -3905,6 +3936,7 @@ class PlayerViewModel {
                     startFromBeginning: request.startFromBeginning,
                     resumePosition: resumePosition,
                     allowNearEndResume: allowNearEndResume,
+                    prefersLastUsedVersion: request.prefersLastUsedVersion,
                     preferredQualityOverride: request.preferredQualityOverride
                 )
             }
@@ -3933,6 +3965,7 @@ class PlayerViewModel {
                 startFromBeginning: request.startFromBeginning,
                 resumePosition: resumePosition,
                 allowNearEndResume: allowNearEndResume,
+                prefersLastUsedVersion: request.prefersLastUsedVersion,
                 preferredQualityOverride: request.preferredQualityOverride
             )
         }
@@ -4130,9 +4163,10 @@ class PlayerViewModel {
         preferredSubtitleTrackIndex: Int? = nil,
         startFromBeginning: Bool,
         resumePositionOverride: Double? = nil,
+        prefersLastUsedVersion: Bool = false,
         offlineDownloadId: String? = nil
     ) {
-        let request = LoadRequest(
+        var request = LoadRequest(
             contentId: contentId,
             preferredFileId: preferredFileId,
             preferredAudioTrackIndex: preferredAudioTrackIndex,
@@ -4141,6 +4175,7 @@ class PlayerViewModel {
             startFromBeginning: startFromBeginning,
             offlineDownloadId: offlineDownloadId
         )
+        request.prefersLastUsedVersion = prefersLastUsedVersion
         beginFreshLoad(
             request: request,
             progressPosition: currentTime,

@@ -33,9 +33,14 @@ struct RecommendationsView: View {
     var body: some View {
         rootLayout
             .task {
+                #if os(iOS)
                 async let recommendations: Void = viewModel.loadRecommendations()
                 async let profile: Void = loadCurrentProfile()
                 _ = await (recommendations, profile)
+                #else
+                await viewModel.loadRecommendations()
+                await loadCurrentProfile()
+                #endif
             }
         #if !os(tvOS)
             .refreshable {
@@ -159,7 +164,14 @@ struct RecommendationsView: View {
                 ForEach(Array(viewModel.sections.enumerated()), id: \.element.id) { index, section in
                     SectionRow(
                         section: section,
-                        onItemTap: { router.navigate(to: .itemDetail(contentId: $0)) },
+                        onItemTap: { destinationContentId, item in
+                            router.navigate(
+                                to: .itemDetail(
+                                    destinationContentId: destinationContentId,
+                                    sectionItem: item
+                                )
+                            )
+                        },
                         prefersDefaultFocusOnFirstItem: prefersDefaultFocus(forSectionAt: index),
                         onMoveUp: nil
                     )

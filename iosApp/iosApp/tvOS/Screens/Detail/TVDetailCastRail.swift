@@ -6,6 +6,9 @@ import SwiftUI
 struct TVDetailCastRail: View {
     let cast: [CastMember]
     let onTap: (String) -> Void
+    /// Non-zero changes explicitly hand focus into the first cast card from
+    /// the composite Series episode carousel.
+    var focusRequest = 0
 
     private let photoWidth: CGFloat = 200
     private let photoHeight: CGFloat = 200
@@ -30,6 +33,10 @@ struct TVDetailCastRail: View {
         .focusSection()
         .applyCastRailDefaultFocus(defaultFocusId, binding: $focusedCastId)
         .scrollClipDisabled()
+        .onChange(of: focusRequest) { _, request in
+            guard request > 0, let defaultFocusId else { return }
+            focusedCastId = defaultFocusId
+        }
     }
 
     private var defaultFocusId: String? {
@@ -116,6 +123,7 @@ private struct CastCardLabel: View {
                 CachedAsyncImage(
                     url: url,
                     targetSize: photoSize,
+                    thumbhash: member.photoThumbhash,
                     contentMode: .fill
                 )
             } else {
