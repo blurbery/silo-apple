@@ -6,9 +6,9 @@ texts are bundled beside this file and are available from Settings > About >
 Open Source Licenses.
 
 AetherEngine
-  Revision: 0ae80496ab6f3fda135f43ef195ff10961c0e625 (release 6.34.0)
+  Revision: c45b4e6585404c0f940c72c4b7680d20347b6982 (release 6.34.0 + native item handoff fix)
   License: GNU LGPL version 3 with the upstream Apple Store / DRM exception
-  Source: https://github.com/superuser404notfound/AetherEngine/tree/0ae80496ab6f3fda135f43ef195ff10961c0e625
+  Source: https://github.com/blurbery/AetherEngine/tree/c45b4e6585404c0f940c72c4b7680d20347b6982
   Rebuild: the Package.swift and source tree at that revision
 
 FFmpegBuild and embedded media frameworks
