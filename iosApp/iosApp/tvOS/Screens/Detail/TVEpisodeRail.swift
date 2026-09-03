@@ -1,41 +1,5 @@
 #if os(tvOS)
-import AudioToolbox
 import SwiftUI
-
-/// One small UI sound for the composite rail, whose selection changes do not
-/// move native focus. Prepare off the main thread and never queue late clicks.
-@MainActor
-private final class TVEpisodeNavigationSound {
-    static let shared = TVEpisodeNavigationSound()
-
-    private var soundID: SystemSoundID?
-    private var preparation: Task<SystemSoundID?, Never>?
-
-    func prepare() async {
-        guard soundID == nil else { return }
-        if preparation == nil {
-            preparation = Task.detached(priority: .userInitiated) {
-                guard let url = Bundle.main.url(
-                    forResource: "episode_navigation",
-                    withExtension: "wav"
-                ) else { return nil }
-                var identifier: SystemSoundID = 0
-                guard AudioServicesCreateSystemSoundID(url as CFURL, &identifier)
-                    == kAudioServicesNoError else { return nil }
-                // Keep the default UI-sound policy and the existing audio session.
-                return identifier
-            }
-        }
-        soundID = await preparation?.value
-    }
-
-    func play() {
-        guard let soundID else { return }
-        // The 12 ms clip fits within a 60 Hz frame. Submit each real selection
-        // immediately, with no debounce, timer, or deferred replay of inputs.
-        AudioServicesPlaySystemSoundWithCompletion(soundID, nil)
-    }
-}
 
 private enum EpisodeHomeHoverMetrics {
     static let scale: CGFloat = 1.08
@@ -78,15 +42,14 @@ struct TVEpisodeRail: View {
     var cardHeightRatio: CGFloat = 9 / 16
     var cardSpacing: CGFloat = 54
     var anchorsFocusedCard = false
-    /// Composite Series rails own horizontal movement, so their vertical exit
-    /// destinations are handed back to the parent explicitly.
+    /// Anchored Series rails hand vertical exits back to the parent while
+    /// native focus owns movement between episode cards.
     var onMoveUp: (() -> Void)? = nil
     var onMoveDown: (() -> Void)? = nil
-    /// Non-zero changes hand focus back to the composite Series episode rail.
+    /// Non-zero changes restore focus to the current Series episode card.
     var focusRequest = 0
 
     @FocusState private var focusedCardId: String?
-    @FocusState private var anchoredRailFocused: Bool
     @State private var anchoredIndex = 0
     @State private var anchoredScrollPosition = ScrollPosition(x: 0)
     @State private var anchoredPlayedOverrides: [String: Bool] = [:]
@@ -155,12 +118,12 @@ struct TVEpisodeRail: View {
         }
     }
 
-    /// Series uses one focus owner for the entire rail. Cards are passive
-    /// labels and the active index drives one native ScrollView position,
-    /// eliminating competing focus owners while leaving scrolling to SwiftUI.
+    /// Episode buttons participate in native focus, including the system's
+    /// navigation sounds. Focus changes only update the existing leading scroll
+    /// position; horizontal input never writes a second focus destination.
     private var anchoredRail: some View {
         GeometryReader { geometry in
-            anchoredButton(viewportWidth: geometry.size.width)
+            anchoredCards(viewportWidth: geometry.size.width)
                 .onAppear {
                     seedAnchoredIndex(viewportWidth: geometry.size.width)
                 }
@@ -168,101 +131,100 @@ struct TVEpisodeRail: View {
                     seedAnchoredIndex(viewportWidth: geometry.size.width)
                 }
                 .onChange(of: currentContentId) { _, _ in
-                    guard !anchoredRailFocused else { return }
+                    guard focusedCardId == nil else { return }
                     seedAnchoredIndex(viewportWidth: geometry.size.width)
                 }
                 .onChange(of: focusRequest) { _, request in
                     guard request > 0 else { return }
                     seedAnchoredIndex(viewportWidth: geometry.size.width)
-                    anchoredRailFocused = true
+                    focusedCardId = anchoredEpisode?.contentId
+                }
+                .onChange(of: focusedCardId) { _, contentId in
+                    if let contentId,
+                       let index = episodes.firstIndex(where: { $0.contentId == contentId }) {
+                        anchorFocusedSelection(at: index, viewportWidth: geometry.size.width)
+                    }
+                    onFocusedEpisodeChange?(contentId)
                 }
         }
         .frame(height: anchoredRailHeight)
         .focusSection()
-        .task {
-            await TVEpisodeNavigationSound.shared.prepare()
-        }
-        .onChange(of: anchoredRailFocused) { _, isFocused in
-            onFocusedEpisodeChange?(isFocused ? anchoredEpisode?.contentId : nil)
-        }
-        .onChange(of: anchoredIndex) { _, _ in
-            guard anchoredRailFocused else { return }
-            onFocusedEpisodeChange?(anchoredEpisode?.contentId)
-        }
         .onDisappear {
             onFocusedEpisodeChange?(nil)
         }
     }
 
-    @ViewBuilder
-    private func anchoredButton(viewportWidth: CGFloat) -> some View {
-        let button = Button {
-            if let contentId = anchoredEpisode?.contentId {
-                onSelect(contentId)
-            }
-        } label: {
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(alignment: .top, spacing: cardSpacing) {
-                    ForEach(Array(episodes.enumerated()), id: \.element.contentId) { index, episode in
-                        let isHovered = anchoredRailFocused && index == anchoredIndex
-                        EpisodeCardLabel(
-                            episode: episode,
-                            isPlayed: anchoredIsPlayed(episode),
-                            isCurrent: currentContentId == episode.contentId,
-                            cardWidth: anchoredCardWidth,
-                            stillHeight: anchoredStillHeight,
-                            stillCornerRadius: 18,
-                            captionStyle: uiCustomization.cardPresentation.caption,
-                            focusOverride: isHovered,
-                            hidesEpisodeTitle: true,
-                            usesHomeHoverEffect: true,
-                            showsFocusOutline: false,
-                            showsCurrentOutline: false
-                        )
-                        .zIndex(isHovered ? 1 : 0)
-                    }
+    private func anchoredCards(viewportWidth: CGFloat) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(alignment: .top, spacing: cardSpacing) {
+                ForEach(Array(episodes.enumerated()), id: \.element.contentId) { index, episode in
+                    anchoredEpisodeButton(episode, index: index)
+                        .zIndex(focusedCardId == episode.contentId ? 1 : 0)
                 }
-                // The active card scales around its center. Reserve exactly
-                // that new left half-width (plus the focus stroke) inside the
-                // hard rail crop so its rounded edge remains visible.
-                .padding(
-                    .leading,
-                    EpisodeHomeHoverMetrics.leadingInset(for: anchoredCardWidth)
-                )
-                .padding(
-                    .trailing,
-                    anchoredTrailingInset(viewportWidth: viewportWidth)
-                )
-                .padding(.vertical, 12)
             }
-            .scrollPosition($anchoredScrollPosition)
-            .scrollDisabled(true)
-            .frame(
-                width: viewportWidth,
-                height: anchoredRailHeight,
-                alignment: .topLeading
+            // Preserve the existing crop, hover clearance and trailing boundary.
+            .padding(
+                .leading,
+                EpisodeHomeHoverMetrics.leadingInset(for: anchoredCardWidth)
             )
-            .clipped()
+            .padding(
+                .trailing,
+                anchoredTrailingInset(viewportWidth: viewportWidth)
+            )
+            .padding(.vertical, 12)
+        }
+        .scrollPosition($anchoredScrollPosition)
+        .scrollDisabled(true)
+        .frame(
+            width: viewportWidth,
+            height: anchoredRailHeight,
+            alignment: .topLeading
+        )
+        .clipped()
+    }
+
+    @ViewBuilder
+    private func anchoredEpisodeButton(_ episode: EpisodeListItem, index: Int) -> some View {
+        let button = Button {
+            onSelect(episode.contentId)
+        } label: {
+            EpisodeCardLabel(
+                episode: episode,
+                isPlayed: anchoredIsPlayed(episode),
+                isCurrent: currentContentId == episode.contentId,
+                cardWidth: anchoredCardWidth,
+                stillHeight: anchoredStillHeight,
+                stillCornerRadius: 18,
+                captionStyle: uiCustomization.cardPresentation.caption,
+                focusOverride: focusedCardId == episode.contentId,
+                hidesEpisodeTitle: true,
+                usesHomeHoverEffect: true,
+                showsFocusOutline: false,
+                showsCurrentOutline: false
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(TVAnchoredEpisodeButtonStyle())
-        .focused($anchoredRailFocused)
+        .focused($focusedCardId, equals: episode.contentId)
         .onMoveCommand { direction in
-            handleAnchoredMove(direction, viewportWidth: viewportWidth)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(anchoredAccessibilityLabel)
-        .accessibilityValue("Episode \(anchoredIndex + 1) of \(max(episodes.count, 1))")
-        .accessibilityAdjustableAction { direction in
+            // Only the vertical boundaries hand off to another focus region.
+            // Left and Right belong entirely to the native episode buttons.
             switch direction {
-            case .increment:
-                moveAnchoredSelection(by: 1, viewportWidth: viewportWidth)
-            case .decrement:
-                moveAnchoredSelection(by: -1, viewportWidth: viewportWidth)
-            @unknown default:
-                break
+            case .up: onMoveUp?()
+            case .down: onMoveDown?()
+            default: break
             }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(episodeRailAccessibilityLabel(
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber,
+            title: episode.title,
+            metadata: anchoredMetadataLine(for: episode),
+            isCurrent: currentContentId == episode.contentId,
+            isPlayed: anchoredIsPlayed(episode)
+        ))
+        .accessibilityValue("Episode \(index + 1) of \(max(episodes.count, 1))")
 
         if onPlay != nil || onSetWatched != nil || onSetFavorite != nil {
             button.contextMenu { anchoredContextActions }
@@ -357,32 +319,11 @@ struct TVEpisodeRail: View {
         }
     }
 
-    private func handleAnchoredMove(
-        _ direction: MoveCommandDirection,
+    private func anchorFocusedSelection(
+        at nextIndex: Int,
         viewportWidth: CGFloat
     ) {
-        switch direction {
-        case .left:
-            moveAnchoredSelection(by: -1, viewportWidth: viewportWidth)
-        case .right:
-            moveAnchoredSelection(by: 1, viewportWidth: viewportWidth)
-        case .up:
-            onMoveUp?()
-        case .down:
-            onMoveDown?()
-        default:
-            break
-        }
-    }
-
-    private func moveAnchoredSelection(
-        by delta: Int,
-        viewportWidth: CGFloat
-    ) {
-        let nextIndex = anchoredIndex + delta
         guard episodes.indices.contains(nextIndex) else { return }
-
-        TVEpisodeNavigationSound.shared.play()
 
         // Keep focus/selection state out of the scroll animation transaction.
         // That prevents hero metadata and every card from inheriting the
@@ -411,18 +352,6 @@ struct TVEpisodeRail: View {
         anchoredFavoriteOverrides[episode.contentId]
             ?? favoriteStates[episode.contentId]
             ?? (currentContentId == episode.contentId && currentContentIsFavorite)
-    }
-
-    private var anchoredAccessibilityLabel: String {
-        guard let episode = anchoredEpisode else { return "Episodes" }
-        return episodeRailAccessibilityLabel(
-            seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber,
-            title: episode.title,
-            metadata: anchoredMetadataLine(for: episode),
-            isCurrent: currentContentId == episode.contentId,
-            isPlayed: anchoredIsPlayed(episode)
-        )
     }
 
     private func anchoredMetadataLine(for episode: EpisodeListItem) -> String? {
@@ -489,9 +418,8 @@ struct TVEpisodeRail: View {
     }
 }
 
-/// Suppresses tvOS's native lift/scroll behavior for the composite carousel.
-/// Its active still supplies the Home-style hover while the rail remains the
-/// sole focus owner.
+/// The native button owns focus and sound, while the artwork supplies the
+/// existing Home-style hover without adding a second system lift effect.
 private struct TVAnchoredEpisodeButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -526,10 +454,8 @@ private extension View {
         }
     }
 
-    /// The composite Series rail cannot use a native `.card` button per cell
-    /// without reintroducing competing focus-scroll owners. Reproduce Home's
-    /// artwork-only lift on the active still while leaving legacy rails exactly
-    /// as they were.
+    /// Reproduce Home's artwork-only lift for the anchored episode buttons.
+    /// Legacy rails retain their existing native `.card` appearance.
     @ViewBuilder
     func episodeHomeHoverEffect(
         enabled: Bool,
