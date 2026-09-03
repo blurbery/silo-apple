@@ -35,7 +35,7 @@ jobs:
             -configuration Release -destination 'generic/platform=tvOS' \
             -archivePath "$RUNNER_TEMP/SiloTV.xcarchive" \
             -derivedDataPath "$RUNNER_TEMP/silo-derived" \
-            MARKETING_VERSION=1.0.0 CURRENT_PROJECT_VERSION=35 \
+            MARKETING_VERSION=1.0.0 CURRENT_PROJECT_VERSION=36 \
             SILO_BUILD_CHANNEL=dev \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY= CODE_SIGN_ENTITLEMENTS=
@@ -47,6 +47,9 @@ jobs:
           ditto -c -k --keepParent \
             "$RUNNER_TEMP/SiloTV.xcarchive/Products/Applications/SiloTV.app" \
             "$RUNNER_TEMP/tvos-device/SiloTV-device.zip"
+          ditto -c -k --keepParent \
+            "$RUNNER_TEMP/SiloTV.xcarchive/dSYMs" \
+            "$RUNNER_TEMP/tvos-device/SiloTV-symbols.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: SiloTV-device

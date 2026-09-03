@@ -95,7 +95,6 @@ struct TVSkylineSectionFeed: View {
             scrollingRows
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(edges: .bottom)
-                .offset(y: ContinuumTheme.Skyline.landingContentVerticalOffset)
 
             // Floats over the band above the row; never focusable or hit-testable.
             TVSkylineMarquee(model: marqueeModel, scale: marqueeScale)
@@ -128,7 +127,15 @@ struct TVSkylineSectionFeed: View {
     private var scrollingRows: some View {
         GeometryReader { proxy in
             let bandHeight = proxy.size.height * ContinuumTheme.Skyline.rowBandHeightFraction
-            let visibleBandHeight = max(0, bandHeight)
+            // Position the focusable viewport with layout, not a render
+            // offset. Its bottom must match the screen's bottom: otherwise
+            // tvOS can resolve directional clicks against offscreen space
+            // while a swipe still pans far enough to reveal the next target.
+            let bandTop = min(
+                proxy.size.height,
+                max(0, proxy.size.height - bandHeight + ContinuumTheme.Skyline.landingContentVerticalOffset)
+            )
+            let visibleBandHeight = max(0, proxy.size.height - bandTop)
             let trailingPreviewPadding = max(
                 0,
                 visibleBandHeight - ContinuumTheme.Skyline.rowBandBottomInset
@@ -166,7 +173,8 @@ struct TVSkylineSectionFeed: View {
             }
             .frame(width: proxy.size.width, height: visibleBandHeight, alignment: .topLeading)
             .clipped()
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottomLeading)
+            .padding(.top, bandTop)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
     }
 
