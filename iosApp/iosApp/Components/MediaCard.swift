@@ -506,11 +506,28 @@ private struct FocusableMediaCard<Content: View>: View {
     let personalItems: PersonalListMenuItems?
     @ViewBuilder var content: () -> Content
 
-    @FocusState private var standaloneFocused: Bool
-
+    @ViewBuilder
     var body: some View {
+        if let focusedItemId, let itemId {
+            card(focusedItemId: focusedItemId, itemId: itemId, standaloneFocused: nil)
+        } else {
+            TVStandaloneCardFocus { binding in
+                card(focusedItemId: nil, itemId: nil, standaloneFocused: binding)
+            }
+        }
+    }
+
+    private func card(
+        focusedItemId: FocusState<String?>.Binding?,
+        itemId: String?,
+        standaloneFocused: FocusState<Bool>.Binding?
+    ) -> some View {
         VStack(alignment: .leading, spacing: 22) {
-            mediaButton
+            mediaButton(
+                focusedItemId: focusedItemId,
+                itemId: itemId,
+                standaloneFocused: standaloneFocused
+            )
 
             if captionStyle.showsTitle {
                 TVMediaCardCaption(
@@ -520,7 +537,7 @@ private struct FocusableMediaCard<Content: View>: View {
                     cardWidth: cardWidth,
                     focusedItemId: focusedItemId,
                     itemId: itemId,
-                    standaloneFocused: $standaloneFocused
+                    standaloneFocused: standaloneFocused
                 )
             }
         }
@@ -528,7 +545,11 @@ private struct FocusableMediaCard<Content: View>: View {
     }
 
     @ViewBuilder
-    private var mediaButton: some View {
+    private func mediaButton(
+        focusedItemId: FocusState<String?>.Binding?,
+        itemId: String?,
+        standaloneFocused: FocusState<Bool>.Binding?
+    ) -> some View {
         let button = Button(action: action) {
             content()
         }
@@ -536,7 +557,7 @@ private struct FocusableMediaCard<Content: View>: View {
         .applyCardFocus(
             focusedItemId,
             itemId: itemId,
-            standaloneBinding: $standaloneFocused
+            standaloneBinding: standaloneFocused
         )
         .applyPlayPauseAction(playAction)
         .accessibilityElement(children: .ignore)
@@ -614,6 +635,18 @@ private struct FocusableMediaCard<Content: View>: View {
     }
 }
 
+/// Only cards outside a managed row need their own focus state. Keeping this
+/// dynamic property out of row cards avoids invalidating their full button
+/// and context-menu bodies when the shared focus environment changes.
+private struct TVStandaloneCardFocus<Content: View>: View {
+    @FocusState private var isFocused: Bool
+    @ViewBuilder var content: (FocusState<Bool>.Binding) -> Content
+
+    var body: some View {
+        content($isFocused)
+    }
+}
+
 /// Only the caption reads focus. The native card button owns its lift and
 /// parallax without rebuilding its artwork and menu when a caption brightens.
 private struct TVMediaCardCaption: View {
@@ -623,10 +656,10 @@ private struct TVMediaCardCaption: View {
     let cardWidth: CGFloat
     let focusedItemId: FocusState<String?>.Binding?
     let itemId: String?
-    let standaloneFocused: FocusState<Bool>.Binding
+    let standaloneFocused: FocusState<Bool>.Binding?
 
     private var isFocused: Bool {
-        guard let focusedItemId, let itemId else { return standaloneFocused.wrappedValue }
+        guard let focusedItemId, let itemId else { return standaloneFocused?.wrappedValue ?? false }
         return focusedItemId.wrappedValue == itemId
     }
 
@@ -675,12 +708,14 @@ private extension View {
     func applyCardFocus(
         _ binding: FocusState<String?>.Binding?,
         itemId: String?,
-        standaloneBinding: FocusState<Bool>.Binding
+        standaloneBinding: FocusState<Bool>.Binding?
     ) -> some View {
         if let binding, let itemId {
             self.focused(binding, equals: itemId)
-        } else {
+        } else if let standaloneBinding {
             self.focused(standaloneBinding)
+        } else {
+            self
         }
     }
 }

@@ -218,6 +218,7 @@ struct TVSkylineSectionFeed: View {
                 }
             )
         )
+        .modifier(TVSkylineArtworkVisibility())
     }
 
     // MARK: - Focus
@@ -282,6 +283,18 @@ struct TVSkylineSectionFeed: View {
         )
     }
 
+}
+
+/// Cancel artwork work when a row leaves the viewport without removing its
+/// buttons from the native focus graph. Visibility changes only at the edge.
+private struct TVSkylineArtworkVisibility: ViewModifier {
+    @State private var isVisible = false
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.tvArtworkLoadingEnabled, isVisible)
+            .onScrollVisibilityChange(threshold: 0.01) { isVisible = $0 }
+    }
 }
 
 /// Observe preview changes at the leaves. Reading the model's properties in
