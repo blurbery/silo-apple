@@ -10,7 +10,6 @@ private final class TVEpisodeNavigationSound {
 
     private var soundID: SystemSoundID?
     private var preparation: Task<SystemSoundID?, Never>?
-    private var lastPlayTime = -Double.infinity
 
     func prepare() async {
         guard soundID == nil else { return }
@@ -32,11 +31,8 @@ private final class TVEpisodeNavigationSound {
 
     func play() {
         guard let soundID else { return }
-        let now = ProcessInfo.processInfo.systemUptime
-        // The clip is 40 ms. Drop faster repeats instead of overlapping or
-        // scheduling audio that would trail behind a rapid swipe.
-        guard now - lastPlayTime >= 0.04 else { return }
-        lastPlayTime = now
+        // The 12 ms clip fits within a 60 Hz frame. Submit each real selection
+        // immediately, with no debounce, timer, or deferred replay of inputs.
         AudioServicesPlaySystemSoundWithCompletion(soundID, nil)
     }
 }
