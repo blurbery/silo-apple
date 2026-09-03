@@ -1213,22 +1213,9 @@ private struct TVMarqueeBlock: View {
     private var metaLine: some View {
         if content.contentId != nil || !displayedMetaParts.isEmpty {
             HStack(spacing: 10) {
-                if content.contentId != nil {
-                    ZStack(alignment: .leading) {
-                        Color.clear
-                        if let contentRatingBadge = displayedContentRatingBadge {
-                            badgeChip(contentRatingBadge)
-                        }
-                    }
-                    .frame(
-                        width: ContinuumTheme.Skyline.marqueeRatingSlotWidth,
-                        height: 27,
-                        alignment: .leading
-                    )
-                    // Ratings appear inside their already-reserved slot.
-                    .transaction { transaction in
-                        transaction.animation = nil
-                    }
+                if let contentRatingBadge = displayedContentRatingBadge {
+                    badgeChip(contentRatingBadge)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
 
                 if !displayedMetaParts.isEmpty {
@@ -1238,6 +1225,9 @@ private struct TVMarqueeBlock: View {
                         .lineLimit(1)
                 }
             }
+            // Keep the line's height stable when a rating arrives, while its
+            // natural width leaves only the stack spacing before the text.
+            .frame(height: 27, alignment: .leading)
             .frame(
                 maxWidth: ContinuumTheme.Skyline.marqueeSynopsisMaxWidth,
                 alignment: .leading
