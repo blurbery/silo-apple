@@ -180,7 +180,9 @@ struct TVEpisodeRail: View {
             .padding(.vertical, 12)
         }
         .scrollPosition($anchoredScrollPosition)
-        .scrollDisabled(true)
+        // The outer season pager is scroll-disabled. Enable only this inner
+        // rail so native focus can reveal the previous offscreen episode.
+        .environment(\.isScrollEnabled, true)
         .frame(
             width: viewportWidth,
             height: anchoredRailHeight,
