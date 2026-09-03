@@ -271,11 +271,12 @@ struct ContinuumTheme {
         static let marqueeLogoMaxHeightLibrary: CGFloat = 150
         /// Codec/HDR badge chip label size (§4.1).
         static let marqueeBadgeSize: CGFloat = 15
-        /// Focus must rest this long before the marquee swaps (§4.2) —
-        /// rolling through cards never thrashes backdrops.
+        /// Delay uncached detail requests while focus passes through cards.
         static let marqueeRestDebounceMilliseconds = 150
-        /// Marquee text + backdrop crossfade duration (§4.2).
-        static let marqueeCrossfadeDuration: Double = 0.24
+        /// Foreground content is immediate; backdrop replacement waits for rest.
+        static let marqueeBackdropRestMilliseconds = 2_000
+        /// Only the backdrop crossfades between rested selections.
+        static let marqueeCrossfadeDuration: Double = 0.55
 
         // MARK: Row band under the marquee (§5.7, revised)
 

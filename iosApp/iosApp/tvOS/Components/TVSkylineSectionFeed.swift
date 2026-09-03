@@ -1,33 +1,3 @@
-enum TVSkylineVerticalMove {
-    case up
-    case down
-}
-
-enum TVSkylineRowMoveTarget: Equatable {
-    case topMenu
-    case row(Int)
-    case none
-}
-
-/// Pure row-boundary routing used by every Skyline landing. Explicit routing
-/// avoids asking the focus engine to discover a row that is still clipped by
-/// the lower-half viewport while the vertical stack is scrolling.
-func tvSkylineRowMoveTarget(
-    currentIndex: Int,
-    rowCount: Int,
-    direction: TVSkylineVerticalMove
-) -> TVSkylineRowMoveTarget {
-    guard rowCount > 0, currentIndex >= 0, currentIndex < rowCount else {
-        return .none
-    }
-    switch direction {
-    case .up:
-        return currentIndex == 0 ? .topMenu : .row(currentIndex - 1)
-    case .down:
-        return currentIndex + 1 < rowCount ? .row(currentIndex + 1) : .none
-    }
-}
-
 #if os(tvOS)
 import SwiftUI
 
@@ -64,7 +34,7 @@ struct TVSkylineSectionFeed: View {
     /// Optional Home-only watched-state mutation. Library feeds leave this nil.
     var onSetWatched: ((SectionItem, Bool) async -> Bool)? = nil
 
-    /// Debounced focused-card state driving the marquee + backdrop.
+    /// Immediate foreground content with a separately delayed backdrop.
     @State private var marqueeModel = TVFocusMarqueeModel()
     /// Token handed only to row 1 when the shell explicitly enters content.
     /// It is never changed during ordinary row-to-row navigation.
@@ -102,9 +72,11 @@ struct TVSkylineSectionFeed: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
+            marqueeModel.resume()
             seedMarqueeFromFirstItem()
             requestEntryFocus(focusRequest)
         }
+        .onDisappear { marqueeModel.suspend() }
         .onChange(of: focusRequest) { _, request in requestEntryFocus(request) }
         .onChange(of: isTopMenuFocused) { _, isFocused in
             if isFocused {
@@ -143,11 +115,12 @@ struct TVSkylineSectionFeed: View {
 
             ScrollViewReader { scrollProxy in
                 ScrollView(.vertical, showsIndicators: false) {
-                    // Keep every row's focus section mounted. A LazyVStack can
-                    // remove the clipped row immediately above/below, leaving
-                    // the Focus Engine no geometric destination and tempting
-                    // callers to force focus manually.
-                    VStack(alignment: .leading, spacing: ContinuumTheme.Skyline.rowBandPreviewSpacing) {
+                    // Bound the live view graph to nearby rows. Keeping the
+                    // entire feed mounted makes focus and scroll transactions
+                    // traverse offscreen card, image, and button subgraphs.
+                    // The native scroll container loads directional targets;
+                    // its viewport uses the corrected layout frames above.
+                    LazyVStack(alignment: .leading, spacing: ContinuumTheme.Skyline.rowBandPreviewSpacing) {
                         ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                             featuredRow(section, isFirstRow: index == 0)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -264,12 +237,9 @@ struct TVSkylineSectionFeed: View {
         )
     }
 
-    /// Cold-entry backdrop: the marquee normally waits for the first card's
-    /// focus report plus the 150 ms rest debounce, which paints the hero as
-    /// a fade-in after the page is already visible. Entry focus always lands
-    /// on the first row's first card, so pre-display that item as soon as
-    /// sections exist; if focus somehow lands elsewhere, the focus-driven
-    /// preview corrects within the debounce window.
+    /// Seed the first card as soon as sections exist, so cold entry does not
+    /// wait for a focus report or the backdrop rest delay. A later focus
+    /// report remains authoritative if the engine lands on another card.
     private func seedMarqueeFromFirstItem() {
         guard marqueeModel.content == nil,
               let section = sections.first,
@@ -308,7 +278,7 @@ private struct TVSkylineBackdrop: View {
             tintColor: model.tintColor,
             artworkURL: model.backdropURL,
             artworkThumbhash: model.backdropThumbhash,
-            isVisible: model.content != nil,
+            isVisible: model.backdropURL != nil,
             crossfadeDuration: ContinuumTheme.Skyline.marqueeCrossfadeDuration
         )
     }
