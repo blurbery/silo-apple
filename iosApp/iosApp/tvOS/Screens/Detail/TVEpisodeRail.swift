@@ -50,6 +50,7 @@ struct TVEpisodeRail: View {
     var focusRequest = 0
 
     @FocusState private var focusedCardId: String?
+    @Namespace private var anchoredFocusScope
     @State private var anchoredIndex = 0
     @State private var anchoredScrollPosition = ScrollPosition(x: 0)
     @State private var anchoredPlayedOverrides: [String: Bool] = [:]
@@ -148,7 +149,12 @@ struct TVEpisodeRail: View {
                 }
         }
         .frame(height: anchoredRailHeight)
+        .focusScope(anchoredFocusScope)
         .focusSection()
+        .applyCurrentEpisodeDefaultFocus(
+            anchoredEpisode?.contentId,
+            binding: $focusedCardId
+        )
         .onDisappear {
             onFocusedEpisodeChange?(nil)
         }
