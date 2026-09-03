@@ -508,44 +508,20 @@ private struct FocusableMediaCard<Content: View>: View {
 
     @FocusState private var standaloneFocused: Bool
 
-    private var isFocused: Bool {
-        guard let focusedItemId, let itemId else { return standaloneFocused }
-        return focusedItemId.wrappedValue == itemId
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             mediaButton
 
             if captionStyle.showsTitle {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.continuumPosterTitle)
-                        .foregroundStyle(
-                            isFocused
-                                ? Color.continuumOnSurface
-                                : Color.continuumOnSurface.opacity(0.85)
-                        )
-                        // A fixed one-line box guarantees even pathological
-                        // titles cannot wrap or paint into the next poster.
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(width: cardWidth, alignment: .leading)
-                        .clipped()
-                        .animation(.easeOut(duration: 0.15), value: isFocused)
-
-                    if captionStyle.showsMetadata,
-                       let secondLine = subtitle ?? year.map(String.init) {
-                        Text(secondLine)
-                            .font(.continuumPosterMetadata)
-                            .foregroundStyle(Color.continuumSecondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .frame(width: cardWidth, alignment: .leading)
-                            .clipped()
-                    }
-                }
-                .frame(width: cardWidth, alignment: .leading)
+                TVMediaCardCaption(
+                    title: title,
+                    secondLine: subtitle ?? year.map(String.init),
+                    showsMetadata: captionStyle.showsMetadata,
+                    cardWidth: cardWidth,
+                    focusedItemId: focusedItemId,
+                    itemId: itemId,
+                    standaloneFocused: $standaloneFocused
+                )
             }
         }
         .frame(width: cardWidth)
@@ -635,6 +611,51 @@ private struct FocusableMediaCard<Content: View>: View {
                 Label("Remove from Continue Watching", systemImage: "xmark.circle")
             }
         }
+    }
+}
+
+/// Only the caption reads focus. The native card button owns its lift and
+/// parallax without rebuilding its artwork and menu when a caption brightens.
+private struct TVMediaCardCaption: View {
+    let title: String
+    let secondLine: String?
+    let showsMetadata: Bool
+    let cardWidth: CGFloat
+    let focusedItemId: FocusState<String?>.Binding?
+    let itemId: String?
+    let standaloneFocused: FocusState<Bool>.Binding
+
+    private var isFocused: Bool {
+        guard let focusedItemId, let itemId else { return standaloneFocused.wrappedValue }
+        return focusedItemId.wrappedValue == itemId
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.continuumPosterTitle)
+                .foregroundStyle(
+                    isFocused
+                        ? Color.continuumOnSurface
+                        : Color.continuumOnSurface.opacity(0.85)
+                )
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: cardWidth, alignment: .leading)
+                .clipped()
+                .animation(.easeOut(duration: 0.15), value: isFocused)
+
+            if showsMetadata, let secondLine {
+                Text(secondLine)
+                    .font(.continuumPosterMetadata)
+                    .foregroundStyle(Color.continuumSecondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: cardWidth, alignment: .leading)
+                    .clipped()
+            }
+        }
+        .frame(width: cardWidth, alignment: .leading)
     }
 }
 

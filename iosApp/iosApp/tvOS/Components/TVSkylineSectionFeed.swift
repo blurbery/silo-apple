@@ -87,13 +87,7 @@ struct TVSkylineSectionFeed: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            TVRootHeroBackdrop(
-                tintColor: marqueeModel.tintColor,
-                artworkURL: marqueeModel.backdropURL,
-                artworkThumbhash: marqueeModel.backdropThumbhash,
-                isVisible: marqueeModel.content != nil,
-                crossfadeDuration: ContinuumTheme.Skyline.marqueeCrossfadeDuration
-            )
+            TVSkylineBackdrop(model: marqueeModel)
 
             // Native scrolling lives only in the bottom row band. The viewport
             // clips at its top edge so rows do not paint through the marquee
@@ -104,11 +98,7 @@ struct TVSkylineSectionFeed: View {
                 .offset(y: ContinuumTheme.Skyline.landingContentVerticalOffset)
 
             // Floats over the band above the row; never focusable or hit-testable.
-            TVFocusMarquee(
-                content: marqueeModel.content,
-                enrichment: marqueeModel.enrichment,
-                scale: marqueeScale
-            )
+            TVSkylineMarquee(model: marqueeModel, scale: marqueeScale)
             .offset(y: ContinuumTheme.Skyline.landingContentVerticalOffset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -284,6 +274,36 @@ struct TVSkylineSectionFeed: View {
         )
     }
 
+}
+
+/// Observe preview changes at the leaves. Reading the model's properties in
+/// the feed's body makes every artwork, tint, and enrichment update rebuild
+/// the scrolling rows and their focusable cards as well.
+private struct TVSkylineBackdrop: View {
+    let model: TVFocusMarqueeModel
+
+    var body: some View {
+        TVRootHeroBackdrop(
+            tintColor: model.tintColor,
+            artworkURL: model.backdropURL,
+            artworkThumbhash: model.backdropThumbhash,
+            isVisible: model.content != nil,
+            crossfadeDuration: ContinuumTheme.Skyline.marqueeCrossfadeDuration
+        )
+    }
+}
+
+private struct TVSkylineMarquee: View {
+    let model: TVFocusMarqueeModel
+    let scale: TVFocusMarquee.Scale
+
+    var body: some View {
+        TVFocusMarquee(
+            content: model.content,
+            enrichment: model.enrichment,
+            scale: scale
+        )
+    }
 }
 
 #endif
