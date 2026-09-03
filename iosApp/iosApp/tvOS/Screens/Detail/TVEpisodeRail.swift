@@ -1,5 +1,45 @@
 #if os(tvOS)
+import AudioToolbox
 import SwiftUI
+
+/// One small UI sound for the composite rail, whose selection changes do not
+/// move native focus. Prepare off the main thread and never queue late clicks.
+@MainActor
+private final class TVEpisodeNavigationSound {
+    static let shared = TVEpisodeNavigationSound()
+
+    private var soundID: SystemSoundID?
+    private var preparation: Task<SystemSoundID?, Never>?
+    private var lastPlayTime = -Double.infinity
+
+    func prepare() async {
+        guard soundID == nil else { return }
+        if preparation == nil {
+            preparation = Task.detached(priority: .userInitiated) {
+                guard let url = Bundle.main.url(
+                    forResource: "episode_navigation",
+                    withExtension: "wav"
+                ) else { return nil }
+                var identifier: SystemSoundID = 0
+                guard AudioServicesCreateSystemSoundID(url as CFURL, &identifier)
+                    == kAudioServicesNoError else { return nil }
+                // Keep the default UI-sound policy and the existing audio session.
+                return identifier
+            }
+        }
+        soundID = await preparation?.value
+    }
+
+    func play() {
+        guard let soundID else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        // The clip is 40 ms. Drop faster repeats instead of overlapping or
+        // scheduling audio that would trail behind a rapid swipe.
+        guard now - lastPlayTime >= 0.04 else { return }
+        lastPlayTime = now
+        AudioServicesPlaySystemSoundWithCompletion(soundID, nil)
+    }
+}
 
 private enum EpisodeHomeHoverMetrics {
     static let scale: CGFloat = 1.08
@@ -143,6 +183,9 @@ struct TVEpisodeRail: View {
         }
         .frame(height: anchoredRailHeight)
         .focusSection()
+        .task {
+            await TVEpisodeNavigationSound.shared.prepare()
+        }
         .onChange(of: anchoredRailFocused) { _, isFocused in
             onFocusedEpisodeChange?(isFocused ? anchoredEpisode?.contentId : nil)
         }
@@ -342,6 +385,8 @@ struct TVEpisodeRail: View {
     ) {
         let nextIndex = anchoredIndex + delta
         guard episodes.indices.contains(nextIndex) else { return }
+
+        TVEpisodeNavigationSound.shared.play()
 
         // Keep focus/selection state out of the scroll animation transaction.
         // That prevents hero metadata and every card from inheriting the

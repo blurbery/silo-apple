@@ -132,6 +132,8 @@ targets:
         buildPhase: resources
         excludes:
           - startup_splash.mp4
+      - path: TVResources
+        buildPhase: resources
     # PRODUCT_BUNDLE_IDENTIFIER and CODE_SIGN_ENTITLEMENTS live in
     # Signing/SiloTV.xcconfig so local contributors can override
     # them via Signing/Local.xcconfig without dirtying this file.
