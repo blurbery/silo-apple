@@ -30,6 +30,7 @@ final class TVFrameHitchMonitor {
     private var displayLink: CADisplayLink?
     private var lastTimestamp: CFTimeInterval = 0
     private var summaryStart: CFTimeInterval = 0
+    private var activeFrameBudget: CFTimeInterval = 1.0 / 60.0
     private var frameCount = 0
     private var hitchCount = 0
     private var lateTotal: CFTimeInterval = 0
@@ -45,22 +46,33 @@ final class TVFrameHitchMonitor {
         let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
         link.add(to: .main, forMode: .common)
         displayLink = link
-        emit("monitor started")
     }
 
     @objc private func tick(_ link: CADisplayLink) {
         let now = link.timestamp
         defer { lastTimestamp = now }
+        let scheduledBudget = link.targetTimestamp - now
+        if scheduledBudget > 0 {
+            activeFrameBudget = scheduledBudget
+        } else if link.duration > 0 {
+            activeFrameBudget = link.duration
+        }
+
         guard lastTimestamp > 0 else {
             summaryStart = now
+            emit(String(
+                format: "capture started: active %.2f Hz, %.2f ms frame budget, image cache %@",
+                1.0 / activeFrameBudget,
+                activeFrameBudget * 1000,
+                PosterImageCache.performanceCacheModeDescription
+            ))
             return
         }
 
         // Derive the frame period from the link's own schedule so adaptive
         // refresh rates are handled; `duration` is undefined before the
         // first callback.
-        let scheduled = link.targetTimestamp - now
-        let frameDuration = scheduled > 0 ? scheduled : 1.0 / 60.0
+        let frameDuration = activeFrameBudget
         let interval = now - lastTimestamp
         frameCount += 1
 
@@ -81,8 +93,15 @@ final class TVFrameHitchMonitor {
 
         if now - summaryStart >= Self.summaryInterval {
             emit(String(
-                format: "summary %ds: %d frames, %d hitches, %.1f ms late total, worst %.1f ms",
-                Int(now - summaryStart), frameCount, hitchCount, lateTotal * 1000, lateMax * 1000
+                format: "summary %ds: %d frames, %d hitches, %.1f ms late total, worst %.1f ms; active %.2f Hz, %.2f ms budget, image cache %@",
+                Int(now - summaryStart),
+                frameCount,
+                hitchCount,
+                lateTotal * 1000,
+                lateMax * 1000,
+                1.0 / activeFrameBudget,
+                activeFrameBudget * 1000,
+                PosterImageCache.performanceCacheModeDescription
             ))
             summaryStart = now
             frameCount = 0

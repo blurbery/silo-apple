@@ -275,11 +275,6 @@ struct ContinuumTheme {
         static let marqueeRestDebounceMilliseconds = 150
         /// Backdrop + tint crossfade between rested selections (§4.2).
         static let marqueeCrossfadeDuration: Double = 0.24
-        /// Longest a row-change scroll may hold the backdrop swap. The hold
-        /// keeps the crossfade out of the row animation, but the band's
-        /// scroll phase stays non-idle for over a second after a single
-        /// move, so the swap releases once the visible motion has finished.
-        static let marqueeBackdropHoldCapMilliseconds = 320
         /// Neighbouring cards on either side of a rested selection whose
         /// backdrop bytes are pulled into the disk cache at low priority,
         /// so the next rest skips the network round trip.
@@ -304,8 +299,8 @@ struct ContinuumTheme {
         /// Regular rows keep the wider tvOS padding so focus lift has more
         /// space in standard scroll layouts.
         static let rowBandCardVerticalPadding: CGFloat = 14
-        /// Duration for the vertical row-stack scroll when paging up/down.
-        static let rowBandScrollDuration: Double = 0.18
+        /// Critically-damped baseline for a full Skyline row-page flight.
+        static let rowBandScrollDuration: Double = 0.40
         /// Distance the outgoing focused row travels as it fades behind the
         /// marquee/title area during row paging.
         static let rowBandExitOffset: CGFloat = 140

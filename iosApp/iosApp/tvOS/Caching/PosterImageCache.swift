@@ -20,6 +20,23 @@ import UIKit
 /// The pipeline is installed as the `ImagePipeline.shared` at first access so
 /// every `LazyImage` / `ImagePipeline.shared` caller picks it up automatically.
 enum PosterImageCache {
+    #if os(tvOS)
+    /// Debug-only launch argument used by repeatable cold-cache performance
+    /// captures. Release builds report the cache as preserved even if the
+    /// argument is accidentally supplied, because they never clear it.
+    static let performanceClearLaunchArgument = "-perfClearImageCaches"
+
+    static var performanceCacheModeDescription: String {
+        #if DEBUG
+        return CommandLine.arguments.contains(performanceClearLaunchArgument)
+            ? "cleared-at-launch"
+            : "preserved"
+        #else
+        return "preserved"
+        #endif
+    }
+    #endif
+
     /// Longest edge, in pixels, of the decode the prefetchers park in the
     /// memory cache for poster, still, cover, and portrait artwork. Sized to
     /// cover every Skyline landing card at the display's native scale
@@ -121,6 +138,15 @@ enum PosterImageCache {
         ImagePipeline.Configuration.isSignpostLoggingEnabled = true
         #endif
         ImagePipeline.shared = makePipeline()
+        #if DEBUG && os(tvOS)
+        // A relaunch is normally a warm-cache run because Nuke's 1 GB data
+        // cache survives process exit. This opt-in path clears both decoded
+        // memory and persistent data only after the app's pipeline has been
+        // installed, giving device captures a repeatable cold-cache start.
+        if CommandLine.arguments.contains(performanceClearLaunchArgument) {
+            ImagePipeline.shared.cache.removeAll(caches: .all)
+        }
+        #endif
         installMemoryPressureObserverIfNeeded()
     }
 
@@ -295,18 +321,5 @@ enum PosterImageCache {
         return displayRequest(url: url, pixelSize: pixelSize, priority: priority)
     }
 
-    /// Fetch and decode one hero backdrop at display size and sample its
-    /// tint, concurrently. Used by the marquee while a row-change scroll
-    /// holds the visible swap: the user is waiting on exactly this image, so
-    /// it runs at high priority and cancels with the caller's task.
-    static func warmHeroBackdrop(_ url: URL) async {
-        async let image: Void = {
-            _ = try? await ImagePipeline.shared.image(
-                for: heroBackdropRequest(for: url, priority: .high)
-            )
-        }()
-        async let tint: Void = { _ = await HeroBackdropPalette.tintColor(for: url) }()
-        _ = await (image, tint)
-    }
     #endif
 }

@@ -14,6 +14,14 @@ enum MediaRowLayout {
     case square
 }
 
+/// A Skyline pager request to place a mounted horizontal rail on a card before
+/// that row is allowed to travel or receive focus. The generation is owned by
+/// the pager; the row acknowledges it only after the exact lazy card exists.
+struct TVMediaRailPreparation: Equatable {
+    let generation: Int
+    let itemId: String
+}
+
 /// A horizontal scrolling row of media cards with a title header.
 /// Plezy style: section title with optional icon, safe-area leading padding.
 struct MediaRow: View {
@@ -55,6 +63,19 @@ struct MediaRow: View {
     /// Monotonic token emitted when a card-pushed detail route pops. The row
     /// that still owns restoration reclaims its exact last-focused card.
     var detailReturnFocusRequest: Int = 0
+    /// Whether this row's cards may participate in the tvOS focus graph.
+    /// Ordinary rows leave this enabled; Skyline locks it to the current row
+    /// and its one explicit vertical destination.
+    var isFocusEnabled: Bool = true
+    /// Skyline's destination rail is already positioned before its focus
+    /// handoff. This path writes FocusState once and deliberately skips the
+    /// legacy scroll-and-repair loop used by unrelated screens.
+    var usesPreparedOneShotFocusRequest: Bool = false
+    /// Optional no-animation horizontal placement requested by Skyline.
+    var railPreparation: TVMediaRailPreparation? = nil
+    var onRailMounted: ((UUID) -> Void)? = nil
+    var onRailUnmounted: ((UUID) -> Void)? = nil
+    var onRailPreparationReady: ((_ generation: Int, _ mountId: UUID) -> Void)? = nil
     var onRemoveFromContinueWatching: ((SectionItem) -> Void)? = nil
     /// Optional tvOS context-menu route used by Continue Watching. Select can
     /// remain a direct resume action while long press still exposes the parent
@@ -87,6 +108,9 @@ struct MediaRow: View {
     var focusRestorationOwner: Binding<Bool>? = nil
 
     @FocusState private var focusedItemId: String?
+    @State private var railMountId = UUID()
+    @State private var visibleRailItemIds: Set<String> = []
+    @State private var lastAcknowledgedRailPreparation = 0
     #if os(tvOS)
     /// Each focus token is applied once. Tracked so the claim works on a
     /// freshly-mounted row too (the Skyline section pager swaps the row's
@@ -114,7 +138,6 @@ struct MediaRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         #if os(tvOS)
         .focusSection()
-        .modifier(TVRowMoveHandler(onMoveUp: onMoveUp, onMoveDown: onMoveDown))
         .modifier(TVRowFocusObserver(focusedItemId: $focusedItemId) { newValue in
             guard let item = items.first(where: { $0.contentId == newValue }) else { return }
             lastFocusedItemId = newValue
@@ -141,6 +164,12 @@ struct MediaRow: View {
         lastAppliedFocusRequest = request
         focusRestorationGeneration += 1
         let generation = focusRestorationGeneration
+        if usesPreparedOneShotFocusRequest {
+            Self.focusLogger.debug("mediaRow.applyPreparedFocus request=\(request, privacy: .public)")
+            focusedItemId = targetItem.contentId
+            lastFocusedItemId = targetItem.contentId
+            return
+        }
         // Scroll to the requested card first, claim a turn later: a row parked
         // deep in its strip can keep that card unmounted (LazyHStack) or clipped, and
         // the focus engine silently drops @FocusState writes to views it
@@ -349,6 +378,9 @@ struct MediaRow: View {
             LazyHStack(alignment: HorizontalMediaRailLayout.cardAlignment, spacing: cardSpacing) {
                 ForEach(items) { item in
                     mediaCard(for: item)
+                        .id(item.contentId)
+                        .onAppear { railItemDidAppear(item.contentId) }
+                        .onDisappear { visibleRailItemIds.remove(item.contentId) }
                 }
             }
             #if !os(tvOS)
@@ -380,12 +412,61 @@ struct MediaRow: View {
         .onAppear { applyFocusRequest(focusRequest, proxy: rowProxy) }
         .onChange(of: focusRequest) { _, request in applyFocusRequest(request, proxy: rowProxy) }
         .onAppear {
+            onRailMounted?(railMountId)
+            applyRailPreparation(railPreparation, proxy: rowProxy)
+        }
+        .onDisappear {
+            onRailUnmounted?(railMountId)
+            visibleRailItemIds.removeAll(keepingCapacity: true)
+        }
+        .onChange(of: railPreparation) { _, request in
+            applyRailPreparation(request, proxy: rowProxy)
+        }
+        .onAppear {
             restoreFocusAfterDetailReturn(detailReturnFocusRequest, proxy: rowProxy)
         }
         .onChange(of: detailReturnFocusRequest) { _, request in
             restoreFocusAfterDetailReturn(request, proxy: rowProxy)
         }
         #endif
+    }
+
+    private func applyRailPreparation(
+        _ request: TVMediaRailPreparation?,
+        proxy: ScrollViewProxy
+    ) {
+        guard let request,
+              items.contains(where: { $0.contentId == request.itemId }) else { return }
+
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            proxy.scrollTo(request.itemId, anchor: .center)
+        }
+
+        // The lazy target can mount as a consequence of scrollTo. Yielding a
+        // render turn makes this an availability acknowledgement, not a timer.
+        Task { @MainActor in
+            await Task.yield()
+            acknowledgeRailPreparationIfReady(request)
+        }
+    }
+
+    private func railItemDidAppear(_ itemId: String) {
+        visibleRailItemIds.insert(itemId)
+        guard let request = railPreparation, request.itemId == itemId else { return }
+        Task { @MainActor in
+            await Task.yield()
+            acknowledgeRailPreparationIfReady(request)
+        }
+    }
+
+    private func acknowledgeRailPreparationIfReady(_ request: TVMediaRailPreparation) {
+        guard request == railPreparation,
+              request.generation != lastAcknowledgedRailPreparation,
+              visibleRailItemIds.contains(request.itemId) else { return }
+        lastAcknowledgedRailPreparation = request.generation
+        onRailPreparationReady?(request.generation, railMountId)
     }
 
     @ViewBuilder
@@ -404,6 +485,9 @@ struct MediaRow: View {
                 action: { onItemTap(item.contentId) },
                 playAction: playAction(for: item),
                 focusedItemId: rowFocusBinding,
+                isFocusEnabled: isFocusEnabled,
+                onMoveUp: onMoveUp,
+                onMoveDown: onMoveDown,
                 contentId: item.contentId,
                 contextPlayTitle: contextPlayTitle(for: item),
                 contextDetailTitle: contextDetailTitle(for: item),
@@ -422,6 +506,9 @@ struct MediaRow: View {
                 usesProvidedTapAction: usesProvidedThumbnailTapAction,
                 playAction: playAction(for: item),
                 focusedItemId: rowFocusBinding,
+                isFocusEnabled: isFocusEnabled,
+                onMoveUp: onMoveUp,
+                onMoveDown: onMoveDown,
                 contextPlayTitle: contextPlayTitle(for: item),
                 contextDetailTitle: contextDetailTitle(for: item),
                 onOpenContextDetail: contextDetailAction(for: item),
@@ -632,12 +719,10 @@ private struct TVRowFocusObserver: ViewModifier {
     }
 }
 
-/// Bridges the row's boundary up/down move commands to the host. Only
-/// attaches an `onMoveCommand` when at least one handler is supplied, so a
-/// row that should stay out of the focus path (e.g. a non-paged row)
-/// never intercepts the commands the focus engine needs for normal
-/// row-to-row movement.
-private struct TVRowMoveHandler: ViewModifier {
+/// Bridges a focused card's up/down move commands to its host. Keeping this
+/// modifier on the actual button gives the deterministic pager first ownership
+/// of a vertical command while Left/Right stay native inside the rail.
+struct TVRowMoveHandler: ViewModifier {
     let onMoveUp: (() -> Void)?
     let onMoveDown: (() -> Void)?
 
@@ -653,6 +738,22 @@ private struct TVRowMoveHandler: ViewModifier {
             }
         } else {
             content
+        }
+    }
+}
+
+/// Exclude locked rows without wrapping enabled Buttons in another focusable
+/// view. A wrapper would prevent `.buttonStyle(.card)` from receiving focus
+/// and remove its native tvOS lift/parallax animation.
+struct TVRowFocusEligibility: ViewModifier {
+    let isEnabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+        } else {
+            content.focusable(false)
         }
     }
 }

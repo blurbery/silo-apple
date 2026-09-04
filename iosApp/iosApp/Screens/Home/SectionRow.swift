@@ -32,6 +32,17 @@ struct SectionRow: View {
     /// tvOS detail-pop token forwarded to `MediaRow`; the row's ownership gate
     /// ensures only the launch row restores its exact previously focused card.
     var detailReturnFocusRequest: Int = 0
+    /// Whether this row's cards may participate in the tvOS focus graph.
+    /// Skyline uses this to expose only its current row and one named
+    /// adjacent destination during a vertical page transaction.
+    var isFocusEnabled: Bool = true
+    /// Skyline-only prepared handoff and rail-mount telemetry. Defaults keep
+    /// every other SectionRow on the existing focus path.
+    var usesPreparedOneShotFocusRequest: Bool = false
+    var railPreparation: TVMediaRailPreparation? = nil
+    var onRailMounted: ((UUID) -> Void)? = nil
+    var onRailUnmounted: ((UUID) -> Void)? = nil
+    var onRailPreparationReady: ((_ generation: Int, _ mountId: UUID) -> Void)? = nil
     var onMoveUp: (() -> Void)? = nil
     /// tvOS-only: card-focus reports forwarded from `MediaRow` so hosts
     /// can drive the Skyline focus marquee with `(item, row title)`.
@@ -116,6 +127,12 @@ struct SectionRow: View {
             focusRequest: focusRequest,
             focusRequestItemId: focusRequestItemId,
             detailReturnFocusRequest: detailReturnFocusRequest,
+            isFocusEnabled: isFocusEnabled,
+            usesPreparedOneShotFocusRequest: usesPreparedOneShotFocusRequest,
+            railPreparation: railPreparation,
+            onRailMounted: onRailMounted,
+            onRailUnmounted: onRailUnmounted,
+            onRailPreparationReady: onRailPreparationReady,
             onRemoveFromContinueWatching: isContinueWatching ? onRemoveFromContinueWatching : nil,
             onOpenContextDetail: nil,
             showsPlayInContextMenu: isContinueWatching,
