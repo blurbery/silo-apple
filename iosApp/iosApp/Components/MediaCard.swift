@@ -566,7 +566,10 @@ private struct FocusableMediaCard<Content: View>: View {
             content()
         }
         .buttonStyle(.card)
-        .focusable(isFocusEnabled)
+        // Do not add a second focusable wrapper around an enabled Button: it
+        // steals focus from `.card` and removes the native lift/parallax. The
+        // eligibility modifier is deliberately a no-op for active-row cards.
+        .modifier(TVRowFocusEligibility(isEnabled: isFocusEnabled))
         .applyCardFocus(
             focusedItemId,
             itemId: itemId,

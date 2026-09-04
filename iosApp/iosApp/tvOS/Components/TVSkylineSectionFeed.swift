@@ -54,6 +54,10 @@ struct TVSkylineSectionFeed: View {
     /// flight. It remains attached to that row's measured position, so rapid
     /// presses replace one snapshot rather than queueing animation layers.
     @State private var outgoingMarquee: TVSkylineOutgoingMarquee?
+    /// Debounced warm-up for the cards an adjacent Up/Down move can target.
+    /// It lets their logo art exist on the first transition frame instead of
+    /// swapping from text while posters are crossing it.
+    @State private var adjacentLogoWarmupTask: Task<Void, Never>?
     /// Geometry updates are isolated from the feed so following a row at the
     /// display refresh rate does not rebuild its card and focus subgraphs.
     @State private var rowMotion = TVSkylineRowMotionModel()
@@ -91,6 +95,8 @@ struct TVSkylineSectionFeed: View {
             requestEntryFocus(focusRequest)
         }
         .onDisappear {
+            adjacentLogoWarmupTask?.cancel()
+            adjacentLogoWarmupTask = nil
             marqueeModel.suspend()
             rowNavigation.cancel()
         }
@@ -320,6 +326,7 @@ struct TVSkylineSectionFeed: View {
 
         focusRestorationOwnerSectionId = section.id
         previewFocusedItem(item, in: section)
+        scheduleAdjacentLogoWarmup(around: item, in: section)
     }
 
     /// Resolve one deterministic adjacent row. Returning to a row restores its
@@ -404,6 +411,48 @@ struct TVSkylineSectionFeed: View {
             candidate,
             neighborBackdropURLs: neighborBackdropURLs(around: item, in: section)
         )
+    }
+
+    /// Warm only the two logo candidates reachable by the next vertical press.
+    /// Horizontal scrubbing is debounced, and the target mirrors the pager's
+    /// remembered-card / closest-index rule exactly.
+    private func scheduleAdjacentLogoWarmup(
+        around item: SectionItem,
+        in section: ResolvedSection
+    ) {
+        adjacentLogoWarmupTask?.cancel()
+        guard let sourceIndex = sections.firstIndex(where: { $0.id == section.id }),
+              let itemIndex = section.items.firstIndex(where: { $0.contentId == item.contentId }) else {
+            adjacentLogoWarmupTask = nil
+            return
+        }
+
+        adjacentLogoWarmupTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled,
+                  focusedSectionId == section.id,
+                  marqueeModel.content?.contentId == item.contentId else { return }
+
+            var seen = Set<URL>()
+            let urls = [-1, 1].compactMap { delta -> URL? in
+                let neighborIndex = sourceIndex + delta
+                guard sections.indices.contains(neighborIndex) else { return nil }
+                let neighbor = sections[neighborIndex]
+                guard !neighbor.items.isEmpty else { return nil }
+                let remembered = rowNavigation.lastFocusedItemId(in: neighbor.id)
+                    .flatMap { rememberedId in
+                        neighbor.items.first(where: { $0.contentId == rememberedId })
+                    }
+                let candidate = remembered
+                    ?? neighbor.items[min(itemIndex, neighbor.items.count - 1)]
+                guard let logoUrl = candidate.logoUrl,
+                      !logoUrl.isEmpty,
+                      let url = URL(string: logoUrl),
+                      seen.insert(url).inserted else { return nil }
+                return url
+            }
+            PosterImageCache.prefetchOriginalArtwork(urls)
+        }
     }
 
     /// If an interrupted focus claim times out, return the foreground and
@@ -498,6 +547,7 @@ struct TVSkylineSectionFeed: View {
                 isContinueWatching: section.isContinueWatchingSection
             )
         )
+        scheduleAdjacentLogoWarmup(around: item, in: section)
     }
 
 }
@@ -574,7 +624,11 @@ private struct TVSkylineTrackedMarquees: View {
                     TVFocusMarquee(
                         content: model.content,
                         enrichment: model.enrichment,
-                        scale: scale
+                        scale: scale,
+                        // Never let an uncached logo replace its text fallback
+                        // halfway through row travel. Adjacent targets are
+                        // warmed ahead of time; a miss loads once motion ends.
+                        allowsLogoLoading: !isTransitioning
                     )
                     .offset(
                         y: marqueeOffset(
@@ -631,12 +685,13 @@ private struct TVSkylineRowFocusRequest: Equatable {
 @Observable
 @MainActor
 private final class TVSkylineRowNavigationModel {
+    static let animationDuration = 0.50
     static let animation = Animation.timingCurve(
         0.16,
         1.0,
         0.30,
         1.0,
-        duration: 0.38
+        duration: animationDuration
     )
 
     private(set) var request: TVSkylineRowFocusRequest?
@@ -760,15 +815,15 @@ private final class TVSkylineRowNavigationModel {
         } else if sawScrollMovement && !isScrollMoving {
             scheduleSettledFinish(
                 generation: nextGeneration,
-                delay: .milliseconds(50)
+                delay: .milliseconds(1)
             )
         } else if !isScrollMoving {
             // A disabled outer ScrollView may omit a phase callback for its
             // programmatic animation. Keep the transaction alive beyond the
-            // 380 ms curve so the marquee retains live row geometry throughout.
+            // 500 ms curve so the marquee retains live row geometry throughout.
             scheduleSettledFinish(
                 generation: nextGeneration,
-                delay: .milliseconds(430)
+                delay: .milliseconds(560)
             )
         }
         return true
@@ -785,7 +840,7 @@ private final class TVSkylineRowNavigationModel {
             if sawScrollMovement {
                 scheduleSettledFinish(
                     generation: nextGeneration,
-                    delay: .milliseconds(50)
+                    delay: .milliseconds(1)
                 )
             }
         } else {
@@ -850,9 +905,9 @@ private final class TVSkylineRowNavigationModel {
         )
     }
 
-    /// Give the focus engine one final frame after scroll idle to publish any
-    /// repair. Without this grace, a late bounce can arrive just after the
-    /// lock clears and make the following command start from the wrong row.
+    /// Keep completion on a cancellable task. The one-millisecond idle yield
+    /// lets the final geometry report land without visibly holding an outgoing
+    /// logo at the top edge after the posters have stopped.
     private func scheduleSettledFinish(
         generation: Int,
         delay: Duration
@@ -886,7 +941,7 @@ private final class TVSkylineRowNavigationModel {
 
     private func armWatchdog(for generation: Int) {
         watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(850))
+            try? await Task.sleep(for: .milliseconds(1200))
             guard !Task.isCancelled else { return }
             self?.finish(generation: generation)
         }

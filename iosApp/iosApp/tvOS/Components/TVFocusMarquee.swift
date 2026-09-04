@@ -1061,6 +1061,9 @@ struct TVFocusMarquee: View {
     /// cached logo, but must not restart logo fetches or VoiceOver announcements
     /// while the newly focused content is already doing that live work.
     var isLivePresentation = true
+    /// Skyline pauses uncached logo fetches during a vertical row transaction.
+    /// Cached logo art is still seeded synchronously on the first frame.
+    var allowsLogoLoading = true
 
     @State private var continueWatchingMetadata = TVContinueWatchingPlaybackMetadataStore.shared
 
@@ -1072,7 +1075,7 @@ struct TVFocusMarquee: View {
                     enrichment: enrichment,
                     badgeOverride: playbackBadgeOverride(for: content),
                     scale: scale,
-                    allowsLogoLoading: isLivePresentation
+                    allowsLogoLoading: isLivePresentation && allowsLogoLoading
                 )
                     .id(content.id)
                     .transition(.identity)
@@ -1208,6 +1211,14 @@ private struct TVMarqueeBlock: View {
         .onAppear {
             if allowsLogoLoading {
                 loadLogoIfCached()
+            }
+        }
+        .onChange(of: allowsLogoLoading) { _, isAllowed in
+            if isAllowed {
+                loadLogoIfCached()
+            } else {
+                logoTask?.cancel()
+                logoTask = nil
             }
         }
         .onDisappear {

@@ -672,6 +672,22 @@ struct TVRowMoveHandler: ViewModifier {
     }
 }
 
+/// Exclude locked rows without wrapping enabled Buttons in another focusable
+/// view. The latter prevents `.buttonStyle(.card)` from receiving focus and
+/// removes its native tvOS lift/parallax animation.
+struct TVRowFocusEligibility: ViewModifier {
+    let isEnabled: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+        } else {
+            content.focusable(false)
+        }
+    }
+}
+
 private extension View {
     /// Routes both initial and user-initiated (d-pad) focus into the
     /// row's first card. The `.userInitiated` priority is the bit that

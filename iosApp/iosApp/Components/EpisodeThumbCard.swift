@@ -346,7 +346,7 @@ struct EpisodeThumbCard: View {
             thumbnail
         }
         .buttonStyle(.card)
-        .focusable(isFocusEnabled)
+        .modifier(TVRowFocusEligibility(isEnabled: isFocusEnabled))
         .applyEpisodeFocus(
             focusedItemId,
             itemId: item.contentId,
