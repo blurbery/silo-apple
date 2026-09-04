@@ -20,6 +20,9 @@ struct MediaRow: View {
     let title: String
     let items: [SectionItem]
     let onItemTap: (String) -> Void
+    /// Detail surfaces can reuse the exact Home rail without drawing a second
+    /// section heading above it. Home keeps the default.
+    var showsHeader = true
     /// tvOS-only direct-play action for focused leaf items. Container items
     /// intentionally receive no Play/Pause command and retain normal focus.
     var onItemPlay: ((SectionItem) -> Void)? = nil
@@ -48,6 +51,9 @@ struct MediaRow: View {
     /// where `.userInitiated` defaultFocus alone doesn't fire because the
     /// focus engine isn't doing the moving.
     var focusRequest: Int = 0
+    /// Optional item used by native default-focus resolution when entering the
+    /// row. Home normally leaves this nil and uses the first card.
+    var defaultFocusItemId: String? = nil
     /// Optional item to claim for a programmatic row handoff. When absent the
     /// request retains its existing first-item behavior. Skyline uses this to
     /// restore the exact card last focused in the preceding row.
@@ -65,6 +71,7 @@ struct MediaRow: View {
     /// only, avoiding a redundant menu entry on ordinary discovery cards.
     var showsPlayInContextMenu = false
     var onSetWatched: ((SectionItem, Bool) async -> Bool)? = nil
+    var onSetFavorite: ((SectionItem, Bool) async -> Bool)? = nil
     var onMoveUp: (() -> Void)? = nil
     /// tvOS-only: reports which of the row's items holds card focus —
     /// the Skyline focus marquee mirrors it. Fires on focus gain only;
@@ -77,6 +84,9 @@ struct MediaRow: View {
     /// Optional tvOS-only vertical padding override for the card strip.
     /// Standard rows keep the default breathing room for focus lift.
     var cardVerticalPadding: CGFloat? = nil
+    /// Home uses the standard safe-area gutter. Embedded detail rails can
+    /// supply the gutter already established by their parent layout.
+    var horizontalContentMargin: CGFloat = ContinuumTheme.safePadding
     /// Down at the row's boundary — used by the Skyline section pager to
     /// page to the next section (there is no row geometrically below).
     var onMoveDown: (() -> Void)? = nil
@@ -108,7 +118,9 @@ struct MediaRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: rowVerticalSpacing) {
-            header
+            if showsHeader {
+                header
+            }
             scrollContent
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -364,14 +376,18 @@ struct MediaRow: View {
         // the engine's scroll-to-focused both align to the margin-inset
         // viewport, so with inner padding they overshoot left by the gutter
         // width and then visibly drift back to the rest position.
-        .contentMargins(.horizontal, ContinuumTheme.safePadding, for: .scrollContent)
+        .contentMargins(.horizontal, horizontalContentMargin, for: .scrollContent)
         // tvOS focus lift expands cards on focus — give them breathing room
         // so they don't clip against the row above/below.
         .scrollClipDisabled()
         .applyDefaultFirstItemFocus(
             enabled: prefersDefaultFocusOnFirstItem,
             binding: $focusedItemId,
-            firstItemId: items.first?.contentId,
+            firstItemId: defaultFocusItemId.flatMap { requestedId in
+                items.contains(where: { $0.contentId == requestedId })
+                    ? requestedId
+                    : nil
+            } ?? items.first?.contentId,
             priority: defaultFocusPriority
         )
         // The programmatic focus kick needs the scroll proxy (it scrolls the
@@ -426,7 +442,9 @@ struct MediaRow: View {
                 contextDetailTitle: contextDetailTitle(for: item),
                 onOpenContextDetail: contextDetailAction(for: item),
                 onRemoveFromContinueWatching: continueWatchingRemovalAction(for: item),
-                onSetWatched: watchedToggleAction(for: item)
+                onSetWatched: watchedToggleAction(for: item),
+                initialIsFavorite: item.userState?.isFavorite == true,
+                onSetFavorite: favoriteToggleAction(for: item)
             )
         }
     }
@@ -506,6 +524,13 @@ struct MediaRow: View {
             }
             #endif
             return await onSetWatched(item, played)
+        }
+    }
+
+    private func favoriteToggleAction(for item: SectionItem) -> ((Bool) async -> Bool)? {
+        guard let onSetFavorite else { return nil }
+        return { isFavorite in
+            await onSetFavorite(item, isFavorite)
         }
     }
 

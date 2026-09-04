@@ -752,12 +752,10 @@ enum StartupContentPrefetcher {
         }
 
         // No client renders a featured hero anymore — featured sections show
-        // as ordinary rows. Entry lands on the first card of the first content
-        // row. Warm that row's logo + art first (so a cold start paints a
-        // finished first row), then the rest. (The first row's logo + backdrop
-        // are sized for the tvOS focus marquee; on other platforms only
-        // posters/episode stills render, so those two are speculative but
-        // harmless.)
+        // as ordinary rows. Entry still earns the first logo and hero backdrop,
+        // but card slots are dealt round-robin across the first four rows. A
+        // row-major fill spent the whole budget on row one and left every row
+        // below it cold just as its LazyHStack began mounting new cards.
         let contentSections = response.sections.filter { !$0.items.isEmpty }
         if let firstRow = contentSections.first {
             append(firstRow.items.first?.logoUrl, into: &logoURLs, seen: &seenLogos)
@@ -770,28 +768,41 @@ enum StartupContentPrefetcher {
             // `PosterImageCache.warmNeighborBackdrops` once the marquee
             // rests, which removes the network round trip without a decode.
             appendBackdrop(firstRow.items.first?.backdropUrl)
-            for item in firstRow.items {
-                if episodeSectionTypes.contains(firstRow.sectionType) {
-                    // Episode stills render the backdrop as the card art and
-                    // the marquee shows the same image as the hero. One
-                    // download, two decode sizes.
-                    append(item.backdropUrl ?? item.posterUrl, into: &cardURLs, seen: &seenCards)
-                } else {
-                    append(item.posterUrl, into: &cardURLs, seen: &seenCards)
-                }
-                if count >= maxHomeArtworkURLs { break }
+        }
+
+        func appendCardArtwork(_ item: SectionItem, in section: ResolvedSection) {
+            if episodeSectionTypes.contains(section.sectionType.lowercased()) {
+                // Episode stills render the backdrop as the card art and the
+                // marquee may show the same source at a separate hero size.
+                append(item.backdropUrl ?? item.posterUrl, into: &cardURLs, seen: &seenCards)
+            } else {
+                append(item.posterUrl, into: &cardURLs, seen: &seenCards)
             }
         }
-        for section in contentSections.dropFirst() {
-            for item in section.items {
-                if episodeSectionTypes.contains(section.sectionType) {
-                    append(item.backdropUrl ?? item.posterUrl, into: &cardURLs, seen: &seenCards)
-                } else {
-                    append(item.posterUrl, into: &cardURLs, seen: &seenCards)
+
+        let startupRows = Array(contentSections.prefix(4))
+        var itemOffset = 0
+        while count < maxHomeArtworkURLs {
+            var foundItemAtOffset = false
+            for section in startupRows where itemOffset < section.items.count {
+                foundItemAtOffset = true
+                appendCardArtwork(section.items[itemOffset], in: section)
+                if count >= maxHomeArtworkURLs { break }
+            }
+            guard foundItemAtOffset else { break }
+            itemOffset += 1
+        }
+
+        // Very short leading rows can leave budget unused. Preserve the old
+        // fallback by spending any remainder on later Home rows.
+        if count < maxHomeArtworkURLs {
+            for section in contentSections.dropFirst(startupRows.count) {
+                for item in section.items {
+                    appendCardArtwork(item, in: section)
+                    if count >= maxHomeArtworkURLs { break }
                 }
                 if count >= maxHomeArtworkURLs { break }
             }
-            if count >= maxHomeArtworkURLs { break }
         }
 
         PosterImageCache.prefetchOriginalArtwork(logoURLs)

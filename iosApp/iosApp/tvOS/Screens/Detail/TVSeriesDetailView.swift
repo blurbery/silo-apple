@@ -1052,6 +1052,8 @@ struct TVSeriesDetailView<BelowSynopsis: View>: View {
                     episodeFavoriteStates[$0] ?? false
                 } ?? false,
                 favoriteStates: episodeFavoriteStates,
+                seriesId: detail.contentId,
+                seriesTitle: detail.title,
                 baseCardWidth: ContinuumTheme.thumbnailCardWidth,
                 cardHeightRatio: ContinuumTheme.thumbnailCardHeight
                     / ContinuumTheme.thumbnailCardWidth,

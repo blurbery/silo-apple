@@ -28,8 +28,11 @@ struct EpisodeThumbCard: View {
     var onOpenContextDetail: (() -> Void)? = nil
     var onRemoveFromContinueWatching: (() -> Void)? = nil
     var onSetWatched: ((Bool) async -> Bool)? = nil
+    var initialIsFavorite = false
+    var onSetFavorite: ((Bool) async -> Bool)? = nil
 
     @State private var playedOverride: Bool?
+    @State private var favoriteOverride: Bool?
     @State private var uiCustomization = UICustomizationPreferences.shared
     @EnvironmentObject private var overlayStore: OverlayPrefsStore
     #if os(tvOS)
@@ -103,6 +106,9 @@ struct EpisodeThumbCard: View {
         .focusSection()
         .onChange(of: item.userState?.played) { _, _ in
             playedOverride = nil
+        }
+        .onChange(of: initialIsFavorite) { _, _ in
+            favoriteOverride = nil
         }
         .task(id: continueWatchingMetadataTaskId) {
             guard onRemoveFromContinueWatching != nil else { return }
@@ -236,6 +242,10 @@ struct EpisodeThumbCard: View {
 
     private var isPlayed: Bool {
         playedOverride ?? (item.userState?.played == true)
+    }
+
+    private var isFavorite: Bool {
+        favoriteOverride ?? initialIsFavorite
     }
 
     private var resolvedOverlayData: OverlayData {
@@ -376,6 +386,7 @@ struct EpisodeThumbCard: View {
         (contextPlayTitle != nil && playAction != nil)
             || onOpenContextDetail != nil
             || onSetWatched != nil
+            || onSetFavorite != nil
             || onRemoveFromContinueWatching != nil
     }
 
@@ -407,6 +418,24 @@ struct EpisodeThumbCard: View {
                 Label(
                     isPlayed ? "Mark as Unwatched" : "Mark as Watched",
                     systemImage: isPlayed ? "circle" : "checkmark.circle"
+                )
+            }
+        }
+
+        if let onSetFavorite {
+            Button {
+                let newFavoriteValue = !isFavorite
+                Task { @MainActor in
+                    favoriteOverride = newFavoriteValue
+                    let succeeded = await onSetFavorite(newFavoriteValue)
+                    if !succeeded {
+                        favoriteOverride = nil
+                    }
+                }
+            } label: {
+                Label(
+                    isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                    systemImage: isFavorite ? "heart.slash" : "heart"
                 )
             }
         }

@@ -1,5 +1,6 @@
 #if os(tvOS)
 import SwiftUI
+import UIKit
 
 private enum EpisodeHomeHoverMetrics {
     static let scale: CGFloat = 1.08
@@ -33,6 +34,8 @@ struct TVEpisodeRail: View {
     var currentContentId: String? = nil
     var currentContentIsFavorite = false
     var favoriteStates: [String: Bool] = [:]
+    var seriesId: String? = nil
+    var seriesTitle: String? = nil
     var prefersCurrentContentFocus = false
     /// Series opts into a larger carousel card. The default keeps the
     /// approved 480-point geometry on existing season/episode pages.
@@ -61,9 +64,80 @@ struct TVEpisodeRail: View {
     @ViewBuilder
     var body: some View {
         if anchorsFocusedCard {
-            anchoredRail
+            homeStyleRail
         } else {
             legacyRail
+        }
+    }
+
+    /// Series uses the same component and card path as Home's Continue
+    /// Watching row. The season tabs and their page transition stay outside
+    /// this view and are unchanged.
+    private var homeStyleRail: some View {
+        MediaRow(
+            title: "Episodes",
+            items: homeStyleItems,
+            onItemTap: onSelect,
+            showsHeader: false,
+            onItemPlay: homeStylePlayAction,
+            showProgress: true,
+            layout: .thumbnail,
+            usesProvidedThumbnailTapAction: true,
+            prefersDefaultFocusOnFirstItem: true,
+            focusRequest: focusRequest,
+            defaultFocusItemId: currentContentId,
+            focusRequestItemId: currentContentId,
+            showsPlayInContextMenu: onPlay != nil,
+            onSetWatched: homeStyleWatchedAction,
+            onSetFavorite: homeStyleFavoriteAction,
+            onMoveUp: onMoveUp,
+            onItemFocus: { item in
+                onFocusedEpisodeChange?(item.contentId)
+            },
+            cardVerticalPadding: 12,
+            horizontalContentMargin: EpisodeHomeHoverMetrics.leadingInset(
+                for: baseCardWidth * uiCustomization.cardPresentation.posterSize.scale
+            ),
+            onMoveDown: onMoveDown
+        )
+        // The enclosing season pager is deliberately scroll-disabled so its
+        // tabs can change pages without the remote dragging that outer rail.
+        // Re-enable scrolling for the nested Home carousel itself.
+        .environment(\.isScrollEnabled, true)
+        .frame(height: anchoredRailHeight, alignment: .topLeading)
+        .onDisappear {
+            onFocusedEpisodeChange?(nil)
+        }
+    }
+
+    private var homeStyleItems: [SectionItem] {
+        episodes.map { episode in
+            SectionItem(
+                episode: episode,
+                seriesId: seriesId,
+                seriesTitle: seriesTitle,
+                isFavorite: favoriteStates[episode.contentId]
+                    ?? (currentContentId == episode.contentId && currentContentIsFavorite)
+            )
+        }
+    }
+
+    private var homeStylePlayAction: ((SectionItem) -> Void)? {
+        guard let onPlay else { return nil }
+        return { item in onPlay(item.contentId) }
+    }
+
+    private var homeStyleWatchedAction: ((SectionItem, Bool) async -> Bool)? {
+        guard let onSetWatched else { return nil }
+        return { item, played in
+            await onSetWatched(item.contentId, played)
+        }
+    }
+
+    private var homeStyleFavoriteAction: ((SectionItem, Bool) async -> Bool)? {
+        guard let onSetFavorite else { return nil }
+        return { item, isFavorite in
+            await onSetFavorite(item.contentId, isFavorite)
         }
     }
 
@@ -71,7 +145,7 @@ struct TVEpisodeRail: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: cardSpacing) {
-                    ForEach(episodes) { episode in
+                    ForEach(Array(episodes.enumerated()), id: \.element.contentId) { index, episode in
                         TVEpisodeCard(
                             episode: episode,
                             isCurrent: currentContentId == episode.contentId,
@@ -88,10 +162,22 @@ struct TVEpisodeRail: View {
                         )
                         .id(episode.contentId)
                         .focused($focusedCardId, equals: episode.contentId)
+                        .onMoveCommand { direction in
+                            guard isOutwardBoundaryMove(direction, at: index) else { return }
+                            holdLegacyBoundary(
+                                at: index,
+                                contentId: episode.contentId,
+                                proxy: proxy
+                            )
+                        }
                     }
                 }
                 .scrollTargetLayout()
                 .padding(.vertical, 12)
+                .background {
+                    TVEpisodeRailBounceDisabler()
+                        .allowsHitTesting(false)
+                }
             }
             .applyEpisodeScrollTargetBehavior(anchorsFocusedCard)
             .focusSection()
@@ -120,8 +206,8 @@ struct TVEpisodeRail: View {
     }
 
     /// Episode buttons participate in native focus, including the system's
-    /// navigation sounds. Focus changes only update the existing leading scroll
-    /// position; horizontal input never writes a second focus destination.
+    /// navigation sounds. Focus changes update the proven leading carousel
+    /// position while horizontal input never writes a second focus destination.
     private var anchoredRail: some View {
         GeometryReader { geometry in
             anchoredCards(viewportWidth: geometry.size.width)
@@ -164,24 +250,27 @@ struct TVEpisodeRail: View {
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(alignment: .top, spacing: cardSpacing) {
                 ForEach(Array(episodes.enumerated()), id: \.element.contentId) { index, episode in
-                    anchoredEpisodeButton(episode, index: index)
+                    anchoredEpisodeButton(
+                        episode,
+                        index: index,
+                        viewportWidth: viewportWidth
+                    )
                         .zIndex(focusedCardId == episode.contentId ? 1 : 0)
                 }
             }
-            // Preserve the existing crop, hover clearance and trailing boundary.
             .padding(
                 .leading,
                 EpisodeHomeHoverMetrics.leadingInset(for: anchoredCardWidth)
             )
-            .padding(
-                .trailing,
-                anchoredTrailingInset(viewportWidth: viewportWidth)
-            )
             .padding(.vertical, 12)
+            .background {
+                TVEpisodeRailBounceDisabler()
+                    .allowsHitTesting(false)
+            }
         }
         .scrollPosition($anchoredScrollPosition)
         // The outer season pager is scroll-disabled. Enable only this inner
-        // rail so native focus can reveal the previous offscreen episode.
+        // rail so native focus can reveal offscreen episodes.
         .environment(\.isScrollEnabled, true)
         .frame(
             width: viewportWidth,
@@ -189,10 +278,22 @@ struct TVEpisodeRail: View {
             alignment: .topLeading
         )
         .clipped()
+        .onScrollGeometryChange(for: CGFloat.self) { geometry in
+            geometry.contentOffset.x
+        } action: { _, liveOffset in
+            clampAnchoredScrollOffset(
+                liveOffset,
+                viewportWidth: viewportWidth
+            )
+        }
     }
 
     @ViewBuilder
-    private func anchoredEpisodeButton(_ episode: EpisodeListItem, index: Int) -> some View {
+    private func anchoredEpisodeButton(
+        _ episode: EpisodeListItem,
+        index: Int,
+        viewportWidth: CGFloat
+    ) -> some View {
         let button = Button {
             onSelect(episode.contentId)
         } label: {
@@ -220,6 +321,9 @@ struct TVEpisodeRail: View {
             switch direction {
             case .up: onMoveUp?()
             case .down: onMoveDown?()
+            case .left, .right:
+                guard isOutwardBoundaryMove(direction, at: index) else { return }
+                holdAnchoredBoundary(at: index, viewportWidth: viewportWidth)
             default: break
             }
         }
@@ -272,32 +376,81 @@ struct TVEpisodeRail: View {
         let step = anchoredCardWidth + cardSpacing
         let contentWidth = CGFloat(episodes.count) * anchoredCardWidth
             + CGFloat(max(episodes.count - 1, 0)) * cardSpacing
-        let minimumTrailingOffset = max(0, contentWidth - viewportWidth)
-        // Keep the hard rail crop, but stop its terminal position on the next
-        // complete card step. The final group can then show a full card at
-        // both edges while the last episode remains entirely visible; any
-        // remainder becomes harmless trailing breathing room.
-        let maximumOffset = ceil(minimumTrailingOffset / step) * step
+        let maximumOffset = anchoredMaximumContentOffset(
+            viewportWidth: viewportWidth,
+            contentWidth: contentWidth
+        )
         return min(CGFloat(index) * step, maximumOffset)
     }
 
-    /// Adds only the extra scrollable width needed to preserve the rail's
-    /// existing stepped trailing boundary. SwiftUI can then clamp concrete
-    /// scroll positions natively without changing the final card grouping.
-    private func anchoredTrailingInset(viewportWidth: CGFloat) -> CGFloat {
-        guard !episodes.isEmpty else { return 0 }
+    private func anchoredMaximumContentOffset(
+        viewportWidth: CGFloat,
+        contentWidth: CGFloat? = nil
+    ) -> CGFloat {
         let leadingInset = EpisodeHomeHoverMetrics.leadingInset(for: anchoredCardWidth)
-        let contentWidth = CGFloat(episodes.count) * anchoredCardWidth
-            + CGFloat(max(episodes.count - 1, 0)) * cardSpacing
-        let naturalMaximumOffset = max(
+        let resolvedContentWidth = contentWidth ?? (
+            CGFloat(episodes.count) * anchoredCardWidth
+                + CGFloat(max(episodes.count - 1, 0)) * cardSpacing
+        )
+        return max(
             0,
-            leadingInset + contentWidth - viewportWidth
+            leadingInset + resolvedContentWidth - viewportWidth
         )
-        let desiredMaximumOffset = anchoredContentOffset(
-            for: episodes.count - 1,
-            viewportWidth: viewportWidth
-        )
-        return max(0, desiredMaximumOffset - naturalMaximumOffset)
+    }
+
+    private func isOutwardBoundaryMove(
+        _ direction: MoveCommandDirection,
+        at index: Int
+    ) -> Bool {
+        guard !episodes.isEmpty else { return false }
+        return (direction == .left && index == episodes.startIndex)
+            || (direction == .right && index == episodes.index(before: episodes.endIndex))
+    }
+
+    private func holdLegacyBoundary(
+        at index: Int,
+        contentId: String,
+        proxy: ScrollViewProxy
+    ) {
+        guard episodes.indices.contains(index) else { return }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            focusedCardId = contentId
+            proxy.scrollTo(
+                contentId,
+                anchor: index == episodes.startIndex ? .leading : .trailing
+            )
+        }
+    }
+
+    private func holdAnchoredBoundary(at index: Int, viewportWidth: CGFloat) {
+        guard episodes.indices.contains(index) else { return }
+        let contentId = episodes[index].contentId
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            anchoredIndex = index
+            focusedCardId = contentId
+            anchoredScrollPosition.scrollTo(
+                x: anchoredContentOffset(for: index, viewportWidth: viewportWidth)
+            )
+        }
+    }
+
+    private func clampAnchoredScrollOffset(
+        _ liveOffset: CGFloat,
+        viewportWidth: CGFloat
+    ) {
+        let maximumOffset = anchoredMaximumContentOffset(viewportWidth: viewportWidth)
+        let clampedOffset = min(max(liveOffset, 0), maximumOffset)
+        guard abs(liveOffset - clampedOffset) > 0.5 else { return }
+
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            anchoredScrollPosition.scrollTo(x: clampedOffset)
+        }
     }
 
     private func seedAnchoredIndex(viewportWidth: CGFloat) {
@@ -310,10 +463,8 @@ struct TVEpisodeRail: View {
         }
 
         // A newly inserted season page inherits the outer pan transaction.
-        // Seeding its internal episode offset inside that same animation made
-        // the cards briefly travel the opposite way while the page itself was
-        // moving correctly. Mount at the resolved index with no animation;
-        // user-driven episode moves retain their normal smooth transition.
+        // Seed its internal episode offset without animating in the opposite
+        // direction; user-driven episode moves retain their smooth transition.
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -333,9 +484,8 @@ struct TVEpisodeRail: View {
     ) {
         guard episodes.indices.contains(index) else { return }
 
-        // Keep focus/selection state out of the scroll animation transaction.
-        // That prevents hero metadata and every card from inheriting the
-        // carousel's animation while the native ScrollView moves its content.
+        // Keep selection state out of the scroll animation transaction so the
+        // hero and cards do not inherit the carousel's motion.
         anchoredIndex = index
         let targetOffset = anchoredContentOffset(
             for: index,
@@ -421,6 +571,107 @@ struct TVEpisodeRail: View {
                         systemImage: anchoredIsFavorite(episode) ? "heart.slash" : "heart"
                     )
                 }
+            }
+        }
+    }
+}
+
+private extension SectionItem {
+    /// Adapts a season episode to the same model consumed by Home's
+    /// Continue Watching carousel. This is data mapping only; the Home row
+    /// remains the sole owner of horizontal scrolling and focus behavior.
+    init(
+        episode: EpisodeListItem,
+        seriesId: String?,
+        seriesTitle: String?,
+        isFavorite: Bool
+    ) {
+        contentId = episode.contentId
+        type = "episode"
+        title = episode.title ?? "Episode \(episode.episodeNumber)"
+        self.seriesId = seriesId
+        self.seriesTitle = seriesTitle
+        seasonNumber = episode.seasonNumber
+        episodeNumber = episode.episodeNumber
+        year = nil
+        genres = nil
+        status = nil
+        ratingImdb = nil
+        ratingTmdb = nil
+        ratingRtCritic = nil
+        ratingRtAudience = nil
+        contentRating = nil
+        runtime = episode.runtime
+        originalLanguage = nil
+        studios = nil
+        networks = nil
+        showStatus = nil
+        overview = episode.overview
+        itemSource = nil
+        positionSeconds = episode.userData?.positionSeconds
+        durationSeconds = episode.userData?.durationSeconds
+        progressUpdatedAt = nil
+        posterUrl = episode.stillUrl
+        posterThumbhash = episode.stillThumbhash
+        backdropUrl = episode.stillUrl
+        backdropThumbhash = episode.stillThumbhash
+        logoUrl = nil
+        userState = MediaItemUserState(
+            played: episode.userData?.played ?? false,
+            isFavorite: isFavorite
+        )
+        overlaySummary = nil
+    }
+}
+
+/// The Siri Remote's touch surface can rubber-band a horizontal ScrollView
+/// beyond its content even when the focus engine correctly stays on the end
+/// card. Disable only that presentation bounce. Unlike the previous boundary
+/// latch, this never disables scrolling or changes the focus graph, so an
+/// inward move remains available immediately.
+private struct TVEpisodeRailBounceDisabler: UIViewRepresentable {
+    func makeUIView(context: Context) -> ProbeView {
+        ProbeView()
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {
+        uiView.configureEnclosingScrollView()
+        DispatchQueue.main.async { [weak uiView] in
+            uiView?.configureEnclosingScrollView()
+        }
+    }
+
+    final class ProbeView: UIView {
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            isUserInteractionEnabled = false
+            isAccessibilityElement = false
+            backgroundColor = .clear
+        }
+
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func didMoveToSuperview() {
+            super.didMoveToSuperview()
+            configureEnclosingScrollView()
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            configureEnclosingScrollView()
+        }
+
+        func configureEnclosingScrollView() {
+            var ancestor = superview
+            while let view = ancestor {
+                if let scrollView = view as? UIScrollView {
+                    scrollView.bounces = false
+                    scrollView.alwaysBounceHorizontal = false
+                    return
+                }
+                ancestor = view.superview
             }
         }
     }

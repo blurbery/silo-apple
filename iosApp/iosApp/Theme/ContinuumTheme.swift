@@ -275,10 +275,10 @@ struct ContinuumTheme {
         static let marqueeRestDebounceMilliseconds = 150
         /// An isolated move gets its backdrop promptly. A second move before
         /// this expires establishes a roll and switches to the longer gate.
-        static let marqueeBackdropIsolatedRestMilliseconds = 800
+        static let marqueeBackdropIsolatedRestMilliseconds = 400
         /// Once focus is rolling, keep hero decoding and compositing out of
         /// navigation until the final selection has been quiet this long.
-        static let marqueeBackdropRollRestMilliseconds = 1_500
+        static let marqueeBackdropRollRestMilliseconds = 800
         /// Backdrop + tint crossfade between rested selections (§4.2).
         static let marqueeCrossfadeDuration: Double = 0.24
 
