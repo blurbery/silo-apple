@@ -567,6 +567,7 @@ struct TVSkylineSectionFeed: View {
         marqueeModel.preview(
             TVMarqueeContent(
                 item: item,
+                rowId: section.id,
                 rowTitle: section.title,
                 isContinueWatching: section.isContinueWatchingSection
             ),
@@ -632,6 +633,7 @@ struct TVSkylineSectionFeed: View {
         marqueeModel.seed(
             TVMarqueeContent(
                 item: item,
+                rowId: section.id,
                 rowTitle: section.title,
                 isContinueWatching: section.isContinueWatchingSection
             )
