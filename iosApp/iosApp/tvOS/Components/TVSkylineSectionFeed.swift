@@ -68,9 +68,9 @@ struct TVSkylineSectionFeed: View {
         ZStack(alignment: .top) {
             TVSkylineBackdrop(model: marqueeModel)
 
-            // Native scrolling lives only in the bottom row band. The viewport
-            // clips at its top edge so rows do not paint through the marquee
-            // title, description, and metadata while they scroll upward.
+            // Native scrolling lives in the bottom row band. Its layout and
+            // focus viewport stay there, while render-only overflow lets a
+            // departing row travel through the hero area like Plex.
             scrollingRows
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(edges: .bottom)
@@ -106,8 +106,9 @@ struct TVSkylineSectionFeed: View {
 
     // MARK: - Rows
 
-    /// Native vertical row scrolling, clipped to the lower band so rows always
-    /// appear from the same bottom area and disappear before the marquee text.
+    /// Native vertical row scrolling whose layout remains in the lower band.
+    /// Rendering may overflow upward during a scroll so the departing row can
+    /// cross the hero area instead of vanishing at a horizontal clip line.
     @ViewBuilder
     private var scrollingRows: some View {
         GeometryReader { proxy in
@@ -151,6 +152,11 @@ struct TVSkylineSectionFeed: View {
                     .padding(.bottom, trailingPreviewPadding)
                 }
                 .scrollTargetBehavior(.viewAligned)
+                // Visual overflow is the key Plex behavior: the native focus
+                // viewport and scroll geometry remain in the lower band, but
+                // the outgoing complete row can travel and fade through the
+                // hero area rather than being cut off at the band's top edge.
+                .scrollClipDisabled()
                 // Row changes animate the band; the marquee holds its backdrop
                 // swap until the scroll settles so the two never composite in
                 // the same frames.
@@ -169,7 +175,6 @@ struct TVSkylineSectionFeed: View {
                 }
             }
             .frame(width: proxy.size.width, height: visibleBandHeight, alignment: .topLeading)
-            .clipped()
             .padding(.top, bandTop)
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
@@ -488,16 +493,28 @@ private struct TVSkylineRowTransition: Equatable {
 
         var incomingOffset: CGFloat {
             switch self {
-            case .up: -TVSkylineRowTransition.travel
-            case .down: TVSkylineRowTransition.travel
+            case .up: -TVSkylineRowTransition.topExitTravel
+            case .down: TVSkylineRowTransition.rowTravel
             }
         }
 
-        var outgoingOffset: CGFloat { -incomingOffset }
+        var outgoingOffset: CGFloat {
+            switch self {
+            case .up: TVSkylineRowTransition.rowTravel
+            case .down: -TVSkylineRowTransition.topExitTravel
+            }
+        }
     }
 
     static let duration = 0.36
-    static let travel: CGFloat = 112
+    /// Approximately one Skyline row stride on the 1080-point tvOS canvas.
+    /// The lower row already sits one stride below the active row, so its
+    /// foreground starts at the same distance and rises alongside it.
+    static let rowTravel: CGFloat = 420
+    /// A row above the active slot receives an additional render-only lift so
+    /// its posters reach the physical top edge instead of stopping midway
+    /// through the hero. Its matching foreground uses the same total travel.
+    static let topExitTravel = rowTravel + ContinuumTheme.Skyline.rowBandExitOffset
     static let incomingStartOpacity = 0.18
     static let animation = Animation.timingCurve(
         0.16, 1.0,
@@ -510,17 +527,26 @@ private struct TVSkylineRowTransition: Equatable {
     let outgoing: TVSkylineMarqueeSnapshot
 }
 
-/// Fades a departing row before the vertical scroll viewport clips it, while
-/// leaving the incoming lower-row preview legible. This is a render-only
-/// effect on the complete row; layout and focus frames remain native.
+/// Extends the native row stride only on the top side. The next row remains
+/// exactly where the existing lower-edge preview placed it; when scrolling
+/// down it rises one native stride with its incoming marquee. The departing
+/// row gets an extra visual lift through the hero so its posters reach the
+/// screen's top, and the reverse transition follows the same path downward.
+/// Layout, hit testing, and focus frames remain native throughout.
 private struct TVSkylineRowScrollPresentation: ViewModifier {
     func body(content: Content) -> some View {
         content.scrollTransition(.interactive, axis: .vertical) { row, phase in
-            row.opacity(
-                phase.value < 0
-                    ? max(0, 1 + phase.value)
-                    : max(0.72, 1 - 0.28 * phase.value)
-            )
+            row
+                .offset(
+                    y: phase.value < 0
+                        ? CGFloat(phase.value) * ContinuumTheme.Skyline.rowBandExitOffset
+                        : 0
+                )
+                .opacity(
+                    phase.value < 0
+                        ? max(0, 1 - phase.value * phase.value)
+                        : max(0.72, 1 - 0.28 * phase.value)
+                )
         }
     }
 }
