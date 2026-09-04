@@ -170,8 +170,17 @@ struct MediaRow: View {
         guard generation == focusRestorationGeneration,
               focusRestorationOwner?.wrappedValue != false,
               items.contains(where: { $0.contentId == targetItem.contentId }) else { return }
+        let wasAlreadyFocused = focusedItemId == targetItem.contentId
         focusedItemId = targetItem.contentId
         lastFocusedItemId = targetItem.contentId
+        // A native vertical move can land here before Skyline publishes its
+        // explicit row request. Reassigning the same FocusState value emits no
+        // observer change, so acknowledge it only when the binding already
+        // proves this exact card owns focus. New/rejected claims still wait
+        // for the real focus observer instead of announcing optimistically.
+        if wasAlreadyFocused {
+            onItemFocus?(targetItem)
+        }
         // Window must outlast the ~300ms animated ride home plus the engine's
         // settling repairs, or the last mid-flight repair wins after all.
         guard attempt < 8 else { return }
