@@ -172,7 +172,6 @@ struct MediaRow: View {
               items.contains(where: { $0.contentId == targetItem.contentId }) else { return }
         focusedItemId = targetItem.contentId
         lastFocusedItemId = targetItem.contentId
-        onItemFocus?(targetItem)
         // Window must outlast the ~300ms animated ride home plus the engine's
         // settling repairs, or the last mid-flight repair wins after all.
         guard attempt < 8 else { return }
@@ -289,7 +288,6 @@ struct MediaRow: View {
               items.contains(where: { $0.contentId == targetItem.contentId }) else { return }
 
         focusedItemId = targetItem.contentId
-        onItemFocus?(targetItem)
 
         guard attempt < 4 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
