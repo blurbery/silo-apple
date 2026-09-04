@@ -80,6 +80,12 @@ struct MediaCard: View {
     /// to a specific card. Pass `nil` for callers that don't need row-level
     /// focus targeting.
     var focusedItemId: FocusState<String?>.Binding? = nil
+    /// tvOS-only eligibility and vertical handoff controls. Skyline disables
+    /// cards outside the current source/destination row pair; other hosts keep
+    /// the defaults and retain ordinary native focus behavior.
+    var isFocusEnabled: Bool = true
+    var onMoveUp: (() -> Void)? = nil
+    var onMoveDown: (() -> Void)? = nil
 
     var contentId: String? = nil
     var contextPlayTitle: String? = nil
@@ -150,6 +156,9 @@ struct MediaCard: View {
             playAction: playAction,
             focusedItemId: focusedItemId,
             itemId: contentId,
+            isFocusEnabled: isFocusEnabled,
+            onMoveUp: onMoveUp,
+            onMoveDown: onMoveDown,
             isWatched: isPlayed,
             contextPlayTitle: contextPlayTitle,
             contextDetailTitle: contextDetailTitle,
@@ -495,6 +504,9 @@ private struct FocusableMediaCard<Content: View>: View {
     /// on d-pad entry.
     let focusedItemId: FocusState<String?>.Binding?
     let itemId: String?
+    let isFocusEnabled: Bool
+    let onMoveUp: (() -> Void)?
+    let onMoveDown: (() -> Void)?
     let isWatched: Bool
     let contextPlayTitle: String?
     let contextDetailTitle: String?
@@ -554,11 +566,13 @@ private struct FocusableMediaCard<Content: View>: View {
             content()
         }
         .buttonStyle(.card)
+        .focusable(isFocusEnabled)
         .applyCardFocus(
             focusedItemId,
             itemId: itemId,
             standaloneBinding: standaloneFocused
         )
+        .modifier(TVRowMoveHandler(onMoveUp: onMoveUp, onMoveDown: onMoveDown))
         .applyPlayPauseAction(playAction)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)

@@ -55,6 +55,10 @@ struct MediaRow: View {
     /// Monotonic token emitted when a card-pushed detail route pops. The row
     /// that still owns restoration reclaims its exact last-focused card.
     var detailReturnFocusRequest: Int = 0
+    /// Whether this row's cards may participate in the tvOS focus graph.
+    /// Ordinary rows leave this enabled; Skyline locks it to the current row
+    /// and its one explicit vertical destination.
+    var isFocusEnabled: Bool = true
     var onRemoveFromContinueWatching: ((SectionItem) -> Void)? = nil
     /// Optional tvOS context-menu route used by Continue Watching. Select can
     /// remain a direct resume action while long press still exposes the parent
@@ -114,7 +118,6 @@ struct MediaRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         #if os(tvOS)
         .focusSection()
-        .modifier(TVRowMoveHandler(onMoveUp: onMoveUp, onMoveDown: onMoveDown))
         .modifier(TVRowFocusObserver(focusedItemId: $focusedItemId) { newValue in
             guard let item = items.first(where: { $0.contentId == newValue }) else { return }
             lastFocusedItemId = newValue
@@ -411,6 +414,9 @@ struct MediaRow: View {
                 action: { onItemTap(item.contentId) },
                 playAction: playAction(for: item),
                 focusedItemId: rowFocusBinding,
+                isFocusEnabled: isFocusEnabled,
+                onMoveUp: onMoveUp,
+                onMoveDown: onMoveDown,
                 contentId: item.contentId,
                 contextPlayTitle: contextPlayTitle(for: item),
                 contextDetailTitle: contextDetailTitle(for: item),
@@ -429,6 +435,9 @@ struct MediaRow: View {
                 usesProvidedTapAction: usesProvidedThumbnailTapAction,
                 playAction: playAction(for: item),
                 focusedItemId: rowFocusBinding,
+                isFocusEnabled: isFocusEnabled,
+                onMoveUp: onMoveUp,
+                onMoveDown: onMoveDown,
                 contextPlayTitle: contextPlayTitle(for: item),
                 contextDetailTitle: contextDetailTitle(for: item),
                 onOpenContextDetail: contextDetailAction(for: item),
@@ -639,12 +648,11 @@ private struct TVRowFocusObserver: ViewModifier {
     }
 }
 
-/// Bridges the row's boundary up/down move commands to the host. Only
-/// attaches an `onMoveCommand` when at least one handler is supplied, so a
-/// row that should stay out of the focus path (e.g. a non-paged row)
-/// never intercepts the commands the focus engine needs for normal
-/// row-to-row movement.
-private struct TVRowMoveHandler: ViewModifier {
+/// Bridges a focused card's up/down move commands to its host. Keeping this
+/// modifier on the actual button (rather than the row container) gives the
+/// deterministic pager first ownership of a vertical remote command while
+/// Left/Right remain native inside the horizontal rail.
+struct TVRowMoveHandler: ViewModifier {
     let onMoveUp: (() -> Void)?
     let onMoveDown: (() -> Void)?
 

@@ -23,6 +23,11 @@ struct EpisodeThumbCard: View {
     /// tvOS-only: parent row's focus tracking binding. See
     /// `MediaCard.focusedItemId` for the contract.
     var focusedItemId: FocusState<String?>.Binding? = nil
+    /// tvOS-only eligibility and vertical handoff controls. Skyline disables
+    /// thumbnails outside its current source/destination row pair.
+    var isFocusEnabled: Bool = true
+    var onMoveUp: (() -> Void)? = nil
+    var onMoveDown: (() -> Void)? = nil
     var contextPlayTitle: String? = nil
     var contextDetailTitle: String? = nil
     var onOpenContextDetail: (() -> Void)? = nil
@@ -341,11 +346,13 @@ struct EpisodeThumbCard: View {
             thumbnail
         }
         .buttonStyle(.card)
+        .focusable(isFocusEnabled)
         .applyEpisodeFocus(
             focusedItemId,
             itemId: item.contentId,
             standaloneBinding: $standaloneFocused
         )
+        .modifier(TVRowMoveHandler(onMoveUp: onMoveUp, onMoveDown: onMoveDown))
         .scaleEffect(isFocused && !reduceMotion ? 1.025 : 1)
         .shadow(
             color: .black.opacity(isFocused ? 0.5 : 0.2),
