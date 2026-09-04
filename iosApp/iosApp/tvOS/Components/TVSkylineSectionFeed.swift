@@ -132,21 +132,11 @@ struct TVSkylineSectionFeed: View {
             requestEntryFocus(focusRequest)
         }
         .onDisappear {
-            horizontalRestTask?.cancel()
-            horizontalRestTask = nil
-            focusConfirmationTask?.cancel()
-            focusConfirmationTask = nil
-            animationGeneration += 1
-            if let flight {
-                TVFrameHitchMonitor.shared.cancelSkylineVerticalInput(flight.inputLatencyToken)
-            }
-            if let preparingCommand { cancelLatencyToken(preparingCommand) }
-            cancelQueuedVerticalCommands()
-            flight = nil
-            preparingDestinationId = nil
-            preparingCommand = nil
-            focusRequestSectionId = nil
-            focusRequestItemId = nil
+            // A detail push can remove the feed while the spring's invisible
+            // physical tail is still retained. Its completion is not reliable
+            // offscreen, so synchronously rebase to the row that actually owns
+            // focus before discarding the generation.
+            cancelActiveNavigation(restoreSource: true)
             marqueeModel.suspend()
         }
         .onChange(of: focusRequest) { _, request in requestEntryFocus(request) }
@@ -1134,7 +1124,10 @@ struct TVSkylineSectionFeed: View {
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             applyPendingMeasurements()
-            if restoreSource { presentedRowIndex = CGFloat(sourceIndex) }
+            if restoreSource {
+                confirmedSectionId = sourceId
+                presentedRowIndex = CGFloat(sourceIndex)
+            }
             flight = nil
             preparingDestinationId = nil
             preparingCommand = nil

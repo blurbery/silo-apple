@@ -243,7 +243,14 @@ During a flight:
   table swap. Rebasing at `.logicallyComplete` while a spring tail is still
   moving creates a visible final hop; delaying the focus claim until `.removed`
   makes a nominal 0.40-second spring feel more than a second late on hardware.
-  Do not perform mid-flight focus repairs.
+  Between those callbacks, do not perform layout-dependent focus work. Native
+  Left/Right within the uniformly transformed focus-owning row is allowed, and
+  Up/Down remains owned by the pager. A queued flight retargets the existing
+  presentation value; only the final generation may rebase. Do not perform
+  mid-flight focus repairs.
+- If the feed disappears during that physical-tail window, cancel the active
+  generation and rebase without animation to the row that actually owns focus.
+  Do not rely on an offscreen `.removed` callback before restoring the feed.
 
 The normal path has one logical-landing focus request. Give its matching
 generation a bounded confirmation window. If the prepared target remains valid

@@ -768,18 +768,15 @@ struct TVRowMoveHandler: ViewModifier {
 }
 
 /// Exclude locked rows without wrapping enabled Buttons in another focusable
-/// view. A wrapper would prevent `.buttonStyle(.card)` from receiving focus
-/// and remove its native tvOS lift/parallax animation.
+/// view. Keep the modifier structurally present when eligibility changes: an
+/// `if` here replaces the card subtree at every handoff, which can rebuild a
+/// whole rail on the main thread. Applying the Boolean form directly retains
+/// the Button and its `.card` identity while updating only focus eligibility.
 struct TVRowFocusEligibility: ViewModifier {
     let isEnabled: Bool
 
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if isEnabled {
-            content
-        } else {
-            content.focusable(false)
-        }
+        content.focusable(isEnabled)
     }
 }
 
