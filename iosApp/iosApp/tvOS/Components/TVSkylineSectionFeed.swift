@@ -352,10 +352,10 @@ struct TVSkylineSectionFeed: View {
         scheduleAdjacentLogoWarmup(around: item, in: section)
     }
 
-    /// Resolve one deterministic adjacent row. Returning to a row restores its
-    /// last card; first entry uses the closest card index from the source row.
-    /// Vertical selection is an exact programmatic page; horizontal movement
-    /// remains entirely owned by each MediaRow.
+    /// Resolve one deterministic adjacent row at the same horizontal card
+    /// index as the source. A vertical move is geometric, so a row's older
+    /// remembered focus must not pull the user sideways when they return to
+    /// it. Horizontal movement remains entirely owned by each MediaRow.
     private func requestVerticalMove(from sourceSectionId: String, delta: Int) {
         guard delta == -1 || delta == 1 else { return }
         if rowNavigation.isInFlight {
@@ -398,14 +398,9 @@ struct TVSkylineSectionFeed: View {
         let sourceItemIndex = sourceItemId
             .flatMap { id in source.items.firstIndex(where: { $0.contentId == id }) }
             ?? 0
-        let rememberedDestinationId = rowNavigation.lastFocusedItemId(in: destination.id)
-            .flatMap { rememberedId in
-                destination.items.contains(where: { $0.contentId == rememberedId })
-                    ? rememberedId
-                    : nil
-            }
-        let targetItemId = rememberedDestinationId
-            ?? destination.items[min(sourceItemIndex, destination.items.count - 1)].contentId
+        let targetItemId = destination.items[
+            min(sourceItemIndex, destination.items.count - 1)
+        ].contentId
         guard let targetItem = destination.items.first(where: { $0.contentId == targetItemId }) else {
             return false
         }
@@ -477,6 +472,7 @@ struct TVSkylineSectionFeed: View {
     private func previewFocusedItem(_ item: SectionItem, in section: ResolvedSection) {
         let candidate = TVMarqueeContent(
             item: item,
+            rowId: section.id,
             rowTitle: section.title,
             isContinueWatching: section.isContinueWatchingSection
         )
@@ -504,7 +500,7 @@ struct TVSkylineSectionFeed: View {
 
     /// Warm only the two logo candidates reachable by the next vertical press.
     /// Horizontal scrubbing is debounced, and the target mirrors the pager's
-    /// remembered-card / closest-index rule exactly.
+    /// same-index rule exactly.
     private func scheduleAdjacentLogoWarmup(
         around item: SectionItem,
         in section: ResolvedSection
@@ -528,12 +524,7 @@ struct TVSkylineSectionFeed: View {
                 guard sections.indices.contains(neighborIndex) else { return nil }
                 let neighbor = sections[neighborIndex]
                 guard !neighbor.items.isEmpty else { return nil }
-                let remembered = rowNavigation.lastFocusedItemId(in: neighbor.id)
-                    .flatMap { rememberedId in
-                        neighbor.items.first(where: { $0.contentId == rememberedId })
-                    }
-                let candidate = remembered
-                    ?? neighbor.items[min(itemIndex, neighbor.items.count - 1)]
+                let candidate = neighbor.items[min(itemIndex, neighbor.items.count - 1)]
                 guard let logoUrl = candidate.logoUrl,
                       !logoUrl.isEmpty,
                       let url = URL(string: logoUrl),
@@ -698,12 +689,22 @@ private struct TVSkylineTrackedMarquees: View {
                         + ContinuumTheme.Skyline.landingContentVerticalOffset
                 )
             )
+            let outgoingRowMinY = outgoing.flatMap {
+                motion.rowMinYBySectionId[$0.sectionId]
+            }
+            // A row change has one foreground owner at a time. Keep the old
+            // row's immutable foreground attached to its posters while it
+            // exits, then reveal the already-prepared destination foreground
+            // when the shared row transaction settles. Rendering both layers
+            // made unrelated logos and titles overlap across the poster band.
+            let presentsOutgoing = isTransitioning
+                && outgoing?.sectionId != focusedSectionId
+                && outgoingRowMinY != nil
 
             ZStack {
-                if isTransitioning,
+                if presentsOutgoing,
                    let outgoing,
-                   outgoing.sectionId != focusedSectionId,
-                   let rowMinY = motion.rowMinYBySectionId[outgoing.sectionId] {
+                   let rowMinY = outgoingRowMinY {
                     TVFocusMarquee(
                         content: outgoing.snapshot.content,
                         enrichment: outgoing.snapshot.enrichment,
@@ -719,7 +720,7 @@ private struct TVSkylineTrackedMarquees: View {
                     )
                 }
 
-                if let focusedSectionId {
+                if let focusedSectionId, !presentsOutgoing {
                     TVFocusMarquee(
                         content: model.content,
                         enrichment: model.enrichment,

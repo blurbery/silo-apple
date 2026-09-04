@@ -50,7 +50,7 @@ struct MediaRow: View {
     var focusRequest: Int = 0
     /// Optional item to claim for a programmatic row handoff. When absent the
     /// request retains its existing first-item behavior. Skyline uses this to
-    /// restore the exact card last focused in the preceding row.
+    /// land on the adjacent row's card at the source row's horizontal index.
     var focusRequestItemId: String? = nil
     /// Monotonic token emitted when a card-pushed detail route pops. The row
     /// that still owns restoration reclaims its exact last-focused card.
