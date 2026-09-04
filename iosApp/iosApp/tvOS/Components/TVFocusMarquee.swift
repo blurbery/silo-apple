@@ -655,6 +655,10 @@ final class TVFocusMarqueeModel {
     private var backdropTask: Task<Void, Never>?
     private var tintTask: Task<Void, Never>?
     private var enrichTask: Task<Void, Never>?
+    /// A second preview before the isolated gate expires establishes a roll.
+    /// The state remains sticky until the final long gate completes, so slower
+    /// focus delivery while a rail scrolls cannot be mistaken for a stop.
+    private var isBackdropRoll = false
     /// The content whose backdrop may be shown. `nil` while a previewed
     /// selection has not rested yet, so enrichment landing early cannot swap
     /// the backdrop ahead of the stop gate.
@@ -685,6 +689,12 @@ final class TVFocusMarqueeModel {
     /// replaces the large composited image and starts its palette work.
     func preview(_ candidate: TVMarqueeContent) {
         guard isActive, candidate != content else { return }
+        if backdropTask != nil {
+            isBackdropRoll = true
+        }
+        let backdropRestMilliseconds = isBackdropRoll
+            ? ContinuumTheme.Skyline.marqueeBackdropRollRestMilliseconds
+            : ContinuumTheme.Skyline.marqueeBackdropIsolatedRestMilliseconds
         backdropTask?.cancel()
         tintTask?.cancel()
         lastSampledTintURL = nil
@@ -692,11 +702,11 @@ final class TVFocusMarqueeModel {
         content = candidate
         loadEnrichment(for: candidate, deferNetwork: true)
         backdropTask = Task { [weak self] in
-            try? await Task.sleep(
-                for: .milliseconds(ContinuumTheme.Skyline.marqueeBackdropRestMilliseconds)
-            )
+            try? await Task.sleep(for: .milliseconds(backdropRestMilliseconds))
             guard !Task.isCancelled, let self,
                   self.isActive, self.content == candidate else { return }
+            self.backdropTask = nil
+            self.isBackdropRoll = false
             self.backdropContentID = candidate.id
             self.updateBackdropIfReady()
         }
@@ -710,6 +720,7 @@ final class TVFocusMarqueeModel {
         backdropTask = nil
         enrichTask = nil
         tintTask = nil
+        isBackdropRoll = false
         backdropContentID = nil
         lastSampledTintURL = nil
     }

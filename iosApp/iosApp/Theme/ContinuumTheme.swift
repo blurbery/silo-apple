@@ -273,10 +273,12 @@ struct ContinuumTheme {
         /// thrashing large backdrops. Matches Android's
         /// `TvMarqueeFocusRestMillis`.
         static let marqueeRestDebounceMilliseconds = 150
-        /// Foreground content is immediate; backdrop replacement waits until
-        /// focus has genuinely stopped so fast horizontal and vertical rolls
-        /// never decode or composite intermediate hero artwork.
-        static let marqueeBackdropRestMilliseconds = 2_000
+        /// An isolated move gets its backdrop promptly. A second move before
+        /// this expires establishes a roll and switches to the longer gate.
+        static let marqueeBackdropIsolatedRestMilliseconds = 800
+        /// Once focus is rolling, keep hero decoding and compositing out of
+        /// navigation until the final selection has been quiet this long.
+        static let marqueeBackdropRollRestMilliseconds = 1_500
         /// Backdrop + tint crossfade between rested selections (§4.2).
         static let marqueeCrossfadeDuration: Double = 0.24
 
