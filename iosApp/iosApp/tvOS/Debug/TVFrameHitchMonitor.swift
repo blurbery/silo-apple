@@ -35,10 +35,48 @@ final class TVFrameHitchMonitor {
     private var hitchCount = 0
     private var lateTotal: CFTimeInterval = 0
     private var lateMax: CFTimeInterval = 0
+    private var skylineInputSequence = 0
+    private var skylineInputTimes: [Int: CFTimeInterval] = [:]
+    private var pendingSkylineFirstFrame: SkylineFirstFrameMarker?
 
     static func installIfRequested() {
         guard CommandLine.arguments.contains(launchArgument) else { return }
         shared.start()
+    }
+
+    /// Records input-to-first-frame latency without adding work to ordinary
+    /// launches. The returned token follows that command through preparation,
+    /// queuing, cancellation and animation scheduling.
+    func recordSkylineVerticalInput(direction: Int) -> Int {
+        guard displayLink != nil else { return 0 }
+        skylineInputSequence += 1
+        let token = skylineInputSequence
+        skylineInputTimes[token] = CACurrentMediaTime()
+        emit("skyline input #\(token) received direction \(direction)")
+        return token
+    }
+
+    func cancelSkylineVerticalInput(_ token: Int) {
+        guard token > 0, skylineInputTimes.removeValue(forKey: token) != nil else { return }
+        emit("skyline input #\(token) cancelled")
+    }
+
+    func markSkylineAnimationScheduled(inputToken: Int, targetIndex: Int) {
+        guard inputToken > 0,
+              let inputTime = skylineInputTimes.removeValue(forKey: inputToken) else { return }
+        let scheduled = CACurrentMediaTime()
+        pendingSkylineFirstFrame = SkylineFirstFrameMarker(
+            token: inputToken,
+            inputTime: inputTime,
+            scheduledTime: scheduled,
+            targetIndex: targetIndex
+        )
+        emit(String(
+            format: "skyline input #%d animation scheduled after %.2f ms for row %d",
+            inputToken,
+            (scheduled - inputTime) * 1000,
+            targetIndex
+        ))
     }
 
     private func start() {
@@ -56,6 +94,18 @@ final class TVFrameHitchMonitor {
             activeFrameBudget = scheduledBudget
         } else if link.duration > 0 {
             activeFrameBudget = link.duration
+        }
+
+        if let marker = pendingSkylineFirstFrame {
+            pendingSkylineFirstFrame = nil
+            let callbackTime = CACurrentMediaTime()
+            emit(String(
+                format: "skyline input #%d first display frame after %.2f ms (%.2f ms after scheduling) for row %d",
+                marker.token,
+                (callbackTime - marker.inputTime) * 1000,
+                (callbackTime - marker.scheduledTime) * 1000,
+                marker.targetIndex
+            ))
         }
 
         guard lastTimestamp > 0 else {
@@ -117,6 +167,13 @@ final class TVFrameHitchMonitor {
         let stamped = String(format: "t+%.1fs %@", CACurrentMediaTime() - startTime, message)
         logger.notice("\(stamped, privacy: .public)")
         FileHandle.standardError.write(Data("[perf.hitch] \(stamped)\n".utf8))
+    }
+
+    private struct SkylineFirstFrameMarker {
+        let token: Int
+        let inputTime: CFTimeInterval
+        let scheduledTime: CFTimeInterval
+        let targetIndex: Int
     }
 }
 #endif

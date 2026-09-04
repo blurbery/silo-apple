@@ -24,9 +24,9 @@ struct TVSkylineSectionFeed: View {
     @State private var presentedRowIndex: CGFloat = 0
     @State private var confirmedSectionId: String?
     @State private var flight: TVSkylineFlight?
-    @State private var pendingVerticalDirection: Int?
+    @State private var pendingVerticalCommands: [TVSkylineVerticalCommand] = []
     @State private var preparingDestinationId: String?
-    @State private var preparingDirection: Int?
+    @State private var preparingCommand: TVSkylineVerticalCommand?
     @State private var animationGeneration = 0
 
     @State private var focusRequestSectionId: String?
@@ -162,8 +162,28 @@ struct TVSkylineSectionFeed: View {
     private var mountedSections: [ResolvedSection] {
         guard !sections.isEmpty else { return [] }
         let center = min(max(flight?.sourceIndex ?? confirmedIndex, 0), sections.count - 1)
-        let lower = max(0, center - 1)
-        let upper = min(sections.count - 1, center + 1)
+        var lower = max(0, center - 1)
+        var upper = min(sections.count - 1, center + 1)
+        if let focusOwnerSectionId = focusRestorationOwnerSectionId,
+           let focusOwnerIndex = sections.firstIndex(where: { $0.id == focusOwnerSectionId }) {
+            lower = min(lower, focusOwnerIndex)
+            upper = max(upper, focusOwnerIndex)
+        }
+
+        // Rapid input widens the otherwise ±1 window only as far as the
+        // bounded queue can reach. Future destinations mount and prepare
+        // while the current page is still flying, so chaining does not add a
+        // press-time layout pause. The actual focus-owning source remains in
+        // this contiguous range until its handoff completes.
+        var projected = flight?.visualTargetIndex
+            ?? preparingCommand.map { confirmedIndex + $0.direction }
+            ?? center
+        for command in pendingVerticalCommands {
+            projected += command.direction
+            guard sections.indices.contains(projected) else { break }
+            lower = min(lower, projected)
+            upper = max(upper, projected)
+        }
         return Array(sections[lower...upper])
     }
 
@@ -260,30 +280,38 @@ struct TVSkylineSectionFeed: View {
     // MARK: - Vertical state machine
 
     private func handleVerticalCommand(_ direction: Int) {
+        let command = TVSkylineVerticalCommand(
+            direction: direction,
+            latencyToken: TVFrameHitchMonitor.shared.recordSkylineVerticalInput(direction: direction)
+        )
+        handleVerticalCommand(command)
+    }
+
+    private func handleVerticalCommand(_ command: TVSkylineVerticalCommand) {
+        let direction = command.direction
         guard direction == -1 || direction == 1, !sections.isEmpty else { return }
 
         if entryLockActive, direction == 1 {
             entryLockActive = false
+            cancelLatencyToken(command)
             return
         }
 
         if flight != nil {
-            handleCommandDuringFlight(direction)
+            handleCommandDuringFlight(command)
             return
         }
 
-        if let preparingDirection {
-            if let pendingVerticalDirection {
-                if direction == -pendingVerticalDirection {
-                    self.pendingVerticalDirection = nil
-                } else {
-                    self.pendingVerticalDirection = direction
-                }
-            } else if direction == -preparingDirection {
+        if let preparingCommand {
+            if !pendingVerticalCommands.isEmpty {
+                enqueueOrCancel(command, after: confirmedIndex + preparingCommand.direction)
+            } else if direction == -preparingCommand.direction {
+                cancelLatencyToken(preparingCommand)
+                cancelLatencyToken(command)
                 preparingDestinationId = nil
-                self.preparingDirection = nil
+                self.preparingCommand = nil
             } else {
-                pendingVerticalDirection = direction
+                enqueueOrCancel(command, after: confirmedIndex + preparingCommand.direction)
             }
             return
         }
@@ -291,17 +319,21 @@ struct TVSkylineSectionFeed: View {
         let source = confirmedIndex
         let destination = source + direction
         if destination < 0 {
+            cancelLatencyToken(command)
             onTopMenuFocusRequest?()
             return
         }
-        guard sections.indices.contains(destination) else { return }
-        beginPreparingFlight(to: destination, direction: direction)
+        guard sections.indices.contains(destination) else {
+            cancelLatencyToken(command)
+            return
+        }
+        beginPreparingFlight(to: destination, command: command)
     }
 
-    private func beginPreparingFlight(to destinationIndex: Int, direction: Int) {
+    private func beginPreparingFlight(to destinationIndex: Int, command: TVSkylineVerticalCommand) {
         let section = sections[destinationIndex]
         preparingDestinationId = section.id
-        preparingDirection = direction
+        preparingCommand = command
         prepareRail(for: section)
         tryStartPreparedFlight()
     }
@@ -309,15 +341,15 @@ struct TVSkylineSectionFeed: View {
     private func tryStartPreparedFlight() {
         guard flight == nil,
               let destinationId = preparingDestinationId,
-              let direction = preparingDirection,
+              let command = preparingCommand,
               let destinationIndex = sections.firstIndex(where: { $0.id == destinationId }),
               abs(destinationIndex - confirmedIndex) == 1,
               destinationIsReady(destinationIndex),
               sourceHasCurrentMeasurement else { return }
 
         preparingDestinationId = nil
-        preparingDirection = nil
-        startFlight(to: destinationIndex, direction: direction)
+        preparingCommand = nil
+        startFlight(to: destinationIndex, command: command)
     }
 
     private var sourceHasCurrentMeasurement: Bool {
@@ -331,7 +363,8 @@ struct TVSkylineSectionFeed: View {
         return measurementIsCurrent(for: section) && railIsPrepared(for: section)
     }
 
-    private func startFlight(to destinationIndex: Int, direction: Int) {
+    private func startFlight(to destinationIndex: Int, command: TVSkylineVerticalCommand) {
+        let direction = command.direction
         let sourceIndex = confirmedIndex
         guard sections.indices.contains(sourceIndex), sections.indices.contains(destinationIndex) else { return }
         let source = sections[sourceIndex]
@@ -352,25 +385,29 @@ struct TVSkylineSectionFeed: View {
             generation: generation,
             pageExtents: extents,
             isAwaitingFocus: false,
-            reduceMotion: reduceMotion
+            reduceMotion: reduceMotion,
+            inputLatencyToken: command.latencyToken,
+            focusOwnerId: focusRestorationOwnerSectionId ?? source.id
         )
 
         if reduceMotion {
+            cancelLatencyToken(command)
             finishFlightAtDestination(generation: generation)
         } else {
-            animatePresentation(to: destinationIndex, generation: generation)
+            animatePresentation(
+                to: destinationIndex,
+                generation: generation,
+                inputLatencyToken: command.latencyToken
+            )
         }
     }
 
-    private func handleCommandDuringFlight(_ direction: Int) {
+    private func handleCommandDuringFlight(_ command: TVSkylineVerticalCommand) {
         guard var currentFlight = flight else { return }
+        let direction = command.direction
 
-        if let pendingVerticalDirection {
-            if direction == -pendingVerticalDirection {
-                self.pendingVerticalDirection = nil
-            } else {
-                self.pendingVerticalDirection = direction
-            }
+        if !pendingVerticalCommands.isEmpty {
+            enqueueOrCancel(command, after: currentFlight.visualTargetIndex)
             return
         }
 
@@ -379,7 +416,8 @@ struct TVSkylineSectionFeed: View {
             ? currentFlight.sourceIndex
             : currentFlight.destinationIndex
 
-        if candidate == otherEndpoint {
+        if candidate == otherEndpoint,
+           currentFlight.focusOwnerId == currentFlight.sourceId {
             focusConfirmationTask?.cancel()
             focusConfirmationTask = nil
             focusRequestSectionId = nil
@@ -389,19 +427,64 @@ struct TVSkylineSectionFeed: View {
             currentFlight.generation = animationGeneration
             currentFlight.visualTargetIndex = otherEndpoint
             currentFlight.isAwaitingFocus = false
+            currentFlight.inputLatencyToken = command.latencyToken
             flight = currentFlight
-            animatePresentation(to: otherEndpoint, generation: currentFlight.generation)
+            animatePresentation(
+                to: otherEndpoint,
+                generation: currentFlight.generation,
+                inputLatencyToken: command.latencyToken
+            )
             return
         }
 
-        let beyondDestination = currentFlight.visualTargetIndex == currentFlight.destinationIndex
-            && direction == currentFlight.direction
-        if beyondDestination {
-            pendingVerticalDirection = direction
-        }
+        enqueueOrCancel(command, after: currentFlight.visualTargetIndex)
     }
 
-    private func animatePresentation(to index: Int, generation: Int) {
+    private func enqueueOrCancel(
+        _ command: TVSkylineVerticalCommand,
+        after activeTargetIndex: Int
+    ) {
+        if let last = pendingVerticalCommands.last,
+           last.direction == -command.direction {
+            pendingVerticalCommands.removeLast()
+            cancelLatencyToken(last)
+            cancelLatencyToken(command)
+            return
+        }
+
+        let queuedDelta = pendingVerticalCommands.reduce(0) { $0 + $1.direction }
+        let projectedDestination = activeTargetIndex + queuedDelta + command.direction
+        guard sections.indices.contains(projectedDestination),
+              pendingVerticalCommands.count < TVSkylineVerticalCommand.queueLimit else {
+            cancelLatencyToken(command)
+            return
+        }
+        pendingVerticalCommands.append(command)
+    }
+
+    private func takeNextQueuedCommand() -> TVSkylineVerticalCommand? {
+        guard !pendingVerticalCommands.isEmpty else { return nil }
+        return pendingVerticalCommands.removeFirst()
+    }
+
+    private func cancelQueuedVerticalCommands() {
+        pendingVerticalCommands.forEach(cancelLatencyToken)
+        pendingVerticalCommands.removeAll(keepingCapacity: true)
+    }
+
+    private func cancelLatencyToken(_ command: TVSkylineVerticalCommand) {
+        TVFrameHitchMonitor.shared.cancelSkylineVerticalInput(command.latencyToken)
+    }
+
+    private func animatePresentation(
+        to index: Int,
+        generation: Int,
+        inputLatencyToken: Int
+    ) {
+        TVFrameHitchMonitor.shared.markSkylineAnimationScheduled(
+            inputToken: inputLatencyToken,
+            targetIndex: index
+        )
         withAnimation(
             .spring(duration: ContinuumTheme.Skyline.rowBandScrollDuration, bounce: 0),
             completionCriteria: .removed
@@ -425,7 +508,7 @@ struct TVSkylineSectionFeed: View {
 
     private func finishReversalAtSource(generation: Int) {
         guard let currentFlight = flight, currentFlight.generation == generation else { return }
-        let pending = pendingVerticalDirection
+        let pending = takeNextQueuedCommand()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -435,11 +518,11 @@ struct TVSkylineSectionFeed: View {
             focusRequestSectionId = nil
             focusRequestItemId = nil
             focusRestorationOwnerSectionId = currentFlight.sourceId
-            pendingVerticalDirection = nil
         }
-        scheduleAdjacentRailPreparation()
         if let pending {
-            DispatchQueue.main.async { handleVerticalCommand(pending) }
+            handleVerticalCommand(pending)
+        } else {
+            scheduleAdjacentRailPreparation()
         }
     }
 
@@ -452,6 +535,25 @@ struct TVSkylineSectionFeed: View {
         let destination = sections[currentFlight.destinationIndex]
         guard railIsPrepared(for: destination), let target = targetItem(for: destination) else {
             rollbackFocusHandoff(generation: generation)
+            return
+        }
+
+        // A queued move continues from the completed endpoint on this same
+        // main-actor turn. Keep the original focused card mounted and eligible
+        // across the bounded chain; claim focus only when the queue drains.
+        if let pending = takeNextQueuedCommand() {
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                applyPendingMeasurements()
+                confirmedSectionId = destination.id
+                presentedRowIndex = CGFloat(currentFlight.destinationIndex)
+                flight = nil
+                focusRequestSectionId = nil
+                focusRequestItemId = nil
+            }
+            rowContent[destination.id] = marqueeContent(for: target, in: destination)
+            handleVerticalCommand(pending)
             return
         }
 
@@ -493,16 +595,19 @@ struct TVSkylineSectionFeed: View {
         focusConfirmationTask?.cancel()
         focusConfirmationTask = nil
         animationGeneration += 1
+        cancelQueuedVerticalCommands()
+        let focusOwnerIndex = sections.firstIndex(where: { $0.id == currentFlight.focusOwnerId })
+            ?? currentFlight.sourceIndex
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             applyPendingMeasurements()
-            presentedRowIndex = CGFloat(currentFlight.sourceIndex)
+            confirmedSectionId = currentFlight.focusOwnerId
+            presentedRowIndex = CGFloat(focusOwnerIndex)
             flight = nil
-            pendingVerticalDirection = nil
             focusRequestSectionId = nil
             focusRequestItemId = nil
-            focusRestorationOwnerSectionId = currentFlight.sourceId
+            focusRestorationOwnerSectionId = currentFlight.focusOwnerId
         }
         scheduleAdjacentRailPreparation()
     }
@@ -539,14 +644,13 @@ struct TVSkylineSectionFeed: View {
     ) {
         focusConfirmationTask?.cancel()
         focusConfirmationTask = nil
-        let pending = pendingVerticalDirection
+        let pending = takeNextQueuedCommand()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             confirmedSectionId = section.id
             presentedRowIndex = CGFloat(currentFlight.destinationIndex)
             flight = nil
-            pendingVerticalDirection = nil
             focusRequestSectionId = nil
             focusRequestItemId = nil
             focusRestorationOwnerSectionId = section.id
@@ -554,9 +658,10 @@ struct TVSkylineSectionFeed: View {
         let candidate = marqueeContent(for: item, in: section)
         rowContent[section.id] = candidate
         preview(candidate, item: item, section: section, settlesImmediately: currentFlight.reduceMotion)
-        scheduleAdjacentRailPreparation()
         if let pending {
-            DispatchQueue.main.async { handleVerticalCommand(pending) }
+            handleVerticalCommand(pending)
+        } else {
+            scheduleAdjacentRailPreparation()
         }
     }
 
@@ -575,10 +680,10 @@ struct TVSkylineSectionFeed: View {
 
     private func isFocusEnabled(_ sectionId: String) -> Bool {
         if let flight {
-            if sectionId == flight.sourceId { return true }
+            if sectionId == flight.focusOwnerId { return true }
             return flight.isAwaitingFocus && sectionId == flight.destinationId
         }
-        return sectionId == confirmedSectionId
+        return sectionId == focusRestorationOwnerSectionId
     }
 
     private func isLivePresentation(_ sectionId: String) -> Bool {
@@ -654,7 +759,8 @@ struct TVSkylineSectionFeed: View {
         preparedRails[sectionId] = nil
         railPreparationKeys[sectionId] = nil
         if let index = sections.firstIndex(where: { $0.id == sectionId }),
-           abs(index - confirmedIndex) == 1 {
+           sectionId != confirmedSectionId,
+           mountedSections.contains(where: { $0.id == sectionId }) {
             prepareRail(for: sections[index])
         }
         tryStartPreparedFlight()
@@ -775,6 +881,8 @@ struct TVSkylineSectionFeed: View {
         focusConfirmationTask = nil
         horizontalRestTask?.cancel()
         horizontalRestTask = nil
+        if let preparingCommand { cancelLatencyToken(preparingCommand) }
+        cancelQueuedVerticalCommands()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -783,8 +891,7 @@ struct TVSkylineSectionFeed: View {
             presentedRowIndex = CGFloat(newIndex)
             flight = nil
             preparingDestinationId = nil
-            preparingDirection = nil
-            pendingVerticalDirection = nil
+            preparingCommand = nil
             focusRequestSectionId = nil
             focusRequestItemId = nil
             focusRestorationOwnerSectionId = newSection.id
@@ -823,6 +930,8 @@ struct TVSkylineSectionFeed: View {
         animationGeneration += 1
         let sourceIndex = flight?.sourceIndex ?? confirmedIndex
         let sourceId = flight?.sourceId ?? confirmedSectionId
+        if let preparingCommand { cancelLatencyToken(preparingCommand) }
+        cancelQueuedVerticalCommands()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
@@ -830,8 +939,7 @@ struct TVSkylineSectionFeed: View {
             if restoreSource { presentedRowIndex = CGFloat(sourceIndex) }
             flight = nil
             preparingDestinationId = nil
-            preparingDirection = nil
-            pendingVerticalDirection = nil
+            preparingCommand = nil
             focusRequestSectionId = nil
             focusRequestItemId = nil
             focusRestorationOwnerSectionId = sourceId
@@ -1063,6 +1171,17 @@ private struct TVSkylineFlight {
     let pageExtents: [String: CGFloat]
     var isAwaitingFocus: Bool
     let reduceMotion: Bool
+    var inputLatencyToken: Int
+    let focusOwnerId: String
+}
+
+private struct TVSkylineVerticalCommand {
+    /// Enough room for deliberate rapid clicks without allowing an unbounded
+    /// hold to mount the entire feed or retain arbitrary remote events.
+    static let queueLimit = 6
+
+    let direction: Int
+    let latencyToken: Int
 }
 
 private struct TVSkylineLayoutSignature: Equatable {

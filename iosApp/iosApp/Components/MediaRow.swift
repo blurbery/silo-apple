@@ -110,6 +110,7 @@ struct MediaRow: View {
     @FocusState private var focusedItemId: String?
     @State private var railMountId = UUID()
     @State private var visibleRailItemIds: Set<String> = []
+    @State private var preparedRailPosition = ScrollPosition(idType: String.self)
     @State private var lastAcknowledgedRailPreparation = 0
     #if os(tvOS)
     /// Each focus token is applied once. Tracked so the claim works on a
@@ -383,6 +384,7 @@ struct MediaRow: View {
                         .onDisappear { visibleRailItemIds.remove(item.contentId) }
                 }
             }
+            .scrollTargetLayout()
             #if !os(tvOS)
             .padding(.horizontal, ContinuumTheme.safePadding)
             #endif
@@ -391,6 +393,7 @@ struct MediaRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         #if os(tvOS)
+        .scrollPosition($preparedRailPosition)
         // The leading gutter must be a content *margin*, not padding inside
         // the scroll content: programmatic `scrollTo(anchor: .leading)` and
         // the engine's scroll-to-focused both align to the margin-inset
@@ -422,6 +425,11 @@ struct MediaRow: View {
         .onChange(of: railPreparation) { _, request in
             applyRailPreparation(request, proxy: rowProxy)
         }
+        .onChange(of: preparedRailPosition.viewID(type: String.self)) { _, itemId in
+            guard let request = railPreparation,
+                  itemId == request.itemId else { return }
+            acknowledgeRailPreparationAfterLayout(request)
+        }
         .onAppear {
             restoreFocusAfterDetailReturn(detailReturnFocusRequest, proxy: rowProxy)
         }
@@ -433,7 +441,7 @@ struct MediaRow: View {
 
     private func applyRailPreparation(
         _ request: TVMediaRailPreparation?,
-        proxy: ScrollViewProxy
+        proxy _: ScrollViewProxy
     ) {
         guard let request,
               items.contains(where: { $0.contentId == request.itemId }) else { return }
@@ -441,21 +449,24 @@ struct MediaRow: View {
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            proxy.scrollTo(request.itemId, anchor: .center)
+            preparedRailPosition.scrollTo(id: request.itemId, anchor: .center)
         }
 
-        // The lazy target can mount as a consequence of scrollTo. Yielding a
-        // render turn makes this an availability acknowledgement, not a timer.
-        Task { @MainActor in
-            await Task.yield()
-            acknowledgeRailPreparationIfReady(request)
-        }
+        // The bound position is the source of truth. Two render turns let the
+        // lazy target mount and let ScrollView apply the requested anchor
+        // before readiness is published to Skyline.
+        acknowledgeRailPreparationAfterLayout(request)
     }
 
     private func railItemDidAppear(_ itemId: String) {
         visibleRailItemIds.insert(itemId)
         guard let request = railPreparation, request.itemId == itemId else { return }
+        acknowledgeRailPreparationAfterLayout(request)
+    }
+
+    private func acknowledgeRailPreparationAfterLayout(_ request: TVMediaRailPreparation) {
         Task { @MainActor in
+            await Task.yield()
             await Task.yield()
             acknowledgeRailPreparationIfReady(request)
         }
@@ -464,6 +475,7 @@ struct MediaRow: View {
     private func acknowledgeRailPreparationIfReady(_ request: TVMediaRailPreparation) {
         guard request == railPreparation,
               request.generation != lastAcknowledgedRailPreparation,
+              preparedRailPosition.viewID(type: String.self) == request.itemId,
               visibleRailItemIds.contains(request.itemId) else { return }
         lastAcknowledgedRailPreparation = request.generation
         onRailPreparationReady?(request.generation, railMountId)
@@ -485,7 +497,7 @@ struct MediaRow: View {
                 action: { onItemTap(item.contentId) },
                 playAction: playAction(for: item),
                 focusedItemId: rowFocusBinding,
-                isFocusEnabled: isFocusEnabled,
+                isFocusEnabled: itemIsFocusEnabled(item.contentId),
                 onMoveUp: onMoveUp,
                 onMoveDown: onMoveDown,
                 contentId: item.contentId,
@@ -506,7 +518,7 @@ struct MediaRow: View {
                 usesProvidedTapAction: usesProvidedThumbnailTapAction,
                 playAction: playAction(for: item),
                 focusedItemId: rowFocusBinding,
-                isFocusEnabled: isFocusEnabled,
+                isFocusEnabled: itemIsFocusEnabled(item.contentId),
                 onMoveUp: onMoveUp,
                 onMoveDown: onMoveDown,
                 contextPlayTitle: contextPlayTitle(for: item),
@@ -528,6 +540,17 @@ struct MediaRow: View {
         #else
         return nil
         #endif
+    }
+
+    /// During Skyline's one-shot handoff, expose only the already-positioned
+    /// target card. This prevents tvOS from briefly choosing card zero and
+    /// scrolling there before the explicit sticky-column focus claim lands.
+    private func itemIsFocusEnabled(_ itemId: String) -> Bool {
+        guard isFocusEnabled else { return false }
+        guard usesPreparedOneShotFocusRequest,
+              focusRequest > 0,
+              let focusRequestItemId else { return true }
+        return itemId == focusRequestItemId
     }
 
     private func progressValue(for item: SectionItem) -> Double? {
