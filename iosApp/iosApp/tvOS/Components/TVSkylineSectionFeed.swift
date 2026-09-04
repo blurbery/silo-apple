@@ -61,6 +61,15 @@ struct TVSkylineSectionFeed: View {
     /// Geometry updates are isolated from the feed so following a row at the
     /// display refresh rate does not rebuild its card and focus subgraphs.
     @State private var rowMotion = TVSkylineRowMotionModel()
+    /// Integer page boundary expressed as a CGFloat so the poster strip and
+    /// both marquee layers can share the exact same animated top-overflow
+    /// transform. Rows before this boundary live above the physical screen.
+    @State private var rowPresentationBoundary: CGFloat = 0
+    /// Repeated remote presses received during a real vertical handoff. They
+    /// are replayed one adjacent page at a time after each anchor settles.
+    @State private var queuedVerticalMoves: [Int] = []
+
+    private static let maximumQueuedVerticalMoves = 8
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -75,9 +84,11 @@ struct TVSkylineSectionFeed: View {
                 model: marqueeModel,
                 motion: rowMotion,
                 scale: marqueeScale,
+                sectionIds: sections.map(\.id),
                 focusedSectionId: focusedSectionId,
                 outgoing: outgoingMarquee,
-                isTransitioning: rowNavigation.isInFlight
+                isTransitioning: rowNavigation.isInFlight,
+                presentationBoundary: rowPresentationBoundary
             )
 
             // Programmatic scrolling and native horizontal focus stay in the
@@ -97,6 +108,7 @@ struct TVSkylineSectionFeed: View {
         .onDisappear {
             adjacentLogoWarmupTask?.cancel()
             adjacentLogoWarmupTask = nil
+            queuedVerticalMoves.removeAll(keepingCapacity: true)
             marqueeModel.suspend()
             rowNavigation.cancel()
         }
@@ -111,11 +123,13 @@ struct TVSkylineSectionFeed: View {
                     // Up/Down command or a later detail-return repair.
                     restoreConfirmedPresentation()
                 }
+                beginNextQueuedVerticalMove()
             }
         }
         .onChange(of: focusRequest) { _, request in requestEntryFocus(request) }
         .onChange(of: isTopMenuFocused) { _, isFocused in
             if isFocused {
+                queuedVerticalMoves.removeAll(keepingCapacity: true)
                 rowNavigation.cancel()
                 focusRestorationOwnerSectionId = nil
             }
@@ -124,6 +138,7 @@ struct TVSkylineSectionFeed: View {
         // token re-fires once they exist.
         .onChange(of: sections.map(\.id)) { _, _ in
             seedMarqueeFromFirstItem()
+            synchronizePresentationBoundary()
             if let pending = pendingFocusRequest { requestEntryFocus(pending) }
         }
     }
@@ -160,26 +175,28 @@ struct TVSkylineSectionFeed: View {
                     // its viewport uses the corrected layout frames above.
                     LazyVStack(alignment: .leading, spacing: ContinuumTheme.Skyline.rowBandPreviewSpacing) {
                         ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
-                            featuredRow(section, index: index)
-                                .fixedSize(horizontal: false, vertical: true)
-                                // The native stride brings the adjacent row to
-                                // its anchor. A top-only render extension lets
-                                // the departing complete row continue beyond
-                                // the physical screen instead of fading out.
-                                .modifier(
-                                    TVSkylineRowScrollPresentation(
-                                        topOverflowTravel: reduceMotion ? 0 : bandTop
+                            // Keep the scroll-layout probe outside the visual
+                            // overflow transform. Lazy layout may stop reporting
+                            // a departing row once it leaves the lower viewport;
+                            // the separately animated overflow still carries both
+                            // its posters and its marquee through the screen edge.
+                            ZStack(alignment: .topLeading) {
+                                featuredRow(section, index: index)
+                                    .modifier(
+                                        TVSkylineRowOverflowPresentation(
+                                            topOverflowTravel: reduceMotion ? 0 : bandTop,
+                                            rowIndex: CGFloat(index),
+                                            presentationBoundary: rowPresentationBoundary
+                                        )
                                     )
+                            }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .modifier(
+                                TVSkylineRowPositionReporter(
+                                    sectionId: section.id,
+                                    motion: rowMotion
                                 )
-                                // Report the final presented position after
-                                // that extension; the matching marquee follows
-                                // this value instead of running its own clock.
-                                .modifier(
-                                    TVSkylineRowPositionReporter(
-                                        sectionId: section.id,
-                                        motion: rowMotion
-                                    )
-                                )
+                            )
                                 .id(section.id)
                         }
                     }
@@ -207,7 +224,13 @@ struct TVSkylineSectionFeed: View {
                 // request so tvOS cannot settle on a different logical row.
                 .onChange(of: rowNavigation.request?.generation) { _, _ in
                     if let request = rowNavigation.request {
+                        let destinationIndex = sections.firstIndex {
+                            $0.id == request.sectionId
+                        }
                         withAnimation(reduceMotion ? nil : TVSkylineRowNavigationModel.animation) {
+                            if let destinationIndex {
+                                rowPresentationBoundary = CGFloat(destinationIndex)
+                            }
                             scrollProxy.scrollTo(request.sectionId, anchor: .top)
                         }
                     }
@@ -334,25 +357,41 @@ struct TVSkylineSectionFeed: View {
     /// Vertical selection is an exact programmatic page; horizontal movement
     /// remains entirely owned by each MediaRow.
     private func requestVerticalMove(from sourceSectionId: String, delta: Int) {
-        guard !rowNavigation.isInFlight,
-              rowNavigation.confirmedSectionId == nil
+        guard delta == -1 || delta == 1 else { return }
+        if rowNavigation.isInFlight {
+            // Entry from the top menu deliberately consumes its originating
+            // Down event. Only an already-running row handoff may queue a
+            // genuinely repeated press.
+            if rowNavigation.acceptsQueuedVerticalMoves {
+                enqueueVerticalMove(delta)
+            }
+            return
+        }
+
+        beginVerticalMove(from: sourceSectionId, delta: delta)
+    }
+
+    @discardableResult
+    private func beginVerticalMove(from sourceSectionId: String, delta: Int) -> Bool {
+        guard rowNavigation.confirmedSectionId == nil
                 || rowNavigation.confirmedSectionId == sourceSectionId,
               let sourceIndex = sections.firstIndex(where: { $0.id == sourceSectionId }) else {
-            return
+            return false
         }
 
         let destinationIndex = sourceIndex + delta
         guard sections.indices.contains(destinationIndex) else {
             if destinationIndex < sections.startIndex {
+                queuedVerticalMoves.removeAll(keepingCapacity: true)
                 focusRestorationOwnerSectionId = nil
                 onTopMenuFocusRequest?()
             }
-            return
+            return false
         }
 
         let source = sections[sourceIndex]
         let destination = sections[destinationIndex]
-        guard !destination.items.isEmpty else { return }
+        guard !destination.items.isEmpty else { return false }
 
         let sourceItemId = rowNavigation.lastFocusedItemId(in: source.id)
             ?? (focusedSectionId == source.id ? marqueeModel.content?.contentId : nil)
@@ -368,7 +407,7 @@ struct TVSkylineSectionFeed: View {
         let targetItemId = rememberedDestinationId
             ?? destination.items[min(sourceItemIndex, destination.items.count - 1)].contentId
         guard let targetItem = destination.items.first(where: { $0.contentId == targetItemId }) else {
-            return
+            return false
         }
 
         // Prime the incoming foreground before scrolling. It is immediately
@@ -383,6 +422,56 @@ struct TVSkylineSectionFeed: View {
             itemId: targetItemId
         )
         previewFocusedItem(targetItem, in: destination)
+        return true
+    }
+
+    /// Preserve one row per physical press while still accepting quick repeat
+    /// input. Reversing before a queued move runs cancels the opposite pending
+    /// step, which keeps rapid direction changes responsive rather than making
+    /// the user wait through a stale round trip.
+    private func enqueueVerticalMove(_ delta: Int) {
+        if queuedVerticalMoves.last == -delta {
+            queuedVerticalMoves.removeLast()
+            return
+        }
+        guard queuedVerticalMoves.count < Self.maximumQueuedVerticalMoves else { return }
+        queuedVerticalMoves.append(delta)
+    }
+
+    /// Retire the old foreground first, then begin at most one queued adjacent
+    /// transaction on the next main turn. That one-frame state boundary keeps
+    /// a completed outgoing logo from being reused by the following handoff.
+    private func beginNextQueuedVerticalMove() {
+        guard !queuedVerticalMoves.isEmpty, !isTopMenuFocused else { return }
+        DispatchQueue.main.async {
+            guard !rowNavigation.isInFlight, !isTopMenuFocused else { return }
+            while !queuedVerticalMoves.isEmpty {
+                let delta = queuedVerticalMoves.removeFirst()
+                guard let sourceSectionId = rowNavigation.confirmedSectionId
+                    ?? focusedSectionId else {
+                    queuedVerticalMoves.removeAll(keepingCapacity: true)
+                    return
+                }
+                if beginVerticalMove(from: sourceSectionId, delta: delta) {
+                    return
+                }
+                if isTopMenuFocused { return }
+            }
+        }
+    }
+
+    /// Section data can be replaced asynchronously. Keep the visual boundary
+    /// attached to the same logical row without animating a data refresh.
+    private func synchronizePresentationBoundary() {
+        let sectionId = rowNavigation.request?.sectionId
+            ?? rowNavigation.confirmedSectionId
+            ?? focusedSectionId
+            ?? sections.first?.id
+        guard let sectionId,
+              let index = sections.firstIndex(where: { $0.id == sectionId }) else { return }
+        withTransaction(Transaction(animation: nil)) {
+            rowPresentationBoundary = CGFloat(index)
+        }
     }
 
     private func previewFocusedItem(_ item: SectionItem, in section: ResolvedSection) {
@@ -590,9 +679,11 @@ private struct TVSkylineTrackedMarquees: View {
     let model: TVFocusMarqueeModel
     let motion: TVSkylineRowMotionModel
     let scale: TVFocusMarquee.Scale
+    let sectionIds: [String]
     let focusedSectionId: String?
     let outgoing: TVSkylineOutgoingMarquee?
     let isTransitioning: Bool
+    let presentationBoundary: CGFloat
 
     var body: some View {
         GeometryReader { proxy in
@@ -618,6 +709,12 @@ private struct TVSkylineTrackedMarquees: View {
                         isLivePresentation: false
                     )
                     .offset(y: marqueeOffset(rowMinY: rowMinY, bandTop: bandTop))
+                    .offset(
+                        y: topOverflowOffset(
+                            sectionId: outgoing.sectionId,
+                            topOverflowTravel: bandTop
+                        )
+                    )
                 }
 
                 if let focusedSectionId {
@@ -640,6 +737,16 @@ private struct TVSkylineTrackedMarquees: View {
                             bandTop: bandTop
                         )
                     )
+                    // Keep this as a separate transform from live row geometry.
+                    // Geometry publications can stop when LazyVStack retires a
+                    // departing row, while this shared animation must continue
+                    // carrying its logo through the physical screen edge.
+                    .offset(
+                        y: topOverflowOffset(
+                            sectionId: focusedSectionId,
+                            topOverflowTravel: bandTop
+                        )
+                    )
                 }
             }
             .frame(width: proxy.size.width, height: proxy.size.height)
@@ -652,6 +759,18 @@ private struct TVSkylineTrackedMarquees: View {
     /// bottom stays welded to the row header on every presented frame.
     private func marqueeOffset(rowMinY: CGFloat, bandTop: CGFloat) -> CGFloat {
         ContinuumTheme.Skyline.landingContentVerticalOffset + rowMinY - bandTop
+    }
+
+    private func topOverflowOffset(
+        sectionId: String,
+        topOverflowTravel: CGFloat
+    ) -> CGFloat {
+        guard let index = sectionIds.firstIndex(of: sectionId) else { return 0 }
+        return TVSkylineRowPresentation.topOverflowOffset(
+            topOverflowTravel: topOverflowTravel,
+            rowIndex: CGFloat(index),
+            presentationBoundary: presentationBoundary
+        )
     }
 }
 
@@ -685,7 +804,7 @@ private struct TVSkylineRowFocusRequest: Equatable {
 @Observable
 @MainActor
 private final class TVSkylineRowNavigationModel {
-    static let animationDuration = 0.50
+    static let animationDuration = 0.60
     static let animation = Animation.timingCurve(
         0.16,
         1.0,
@@ -707,6 +826,7 @@ private final class TVSkylineRowNavigationModel {
     @ObservationIgnored private var targetFocusObserved = false
     @ObservationIgnored private var sawScrollMovement = false
     @ObservationIgnored private var isScrollMoving = false
+    @ObservationIgnored private var acceptsQueuedMoveCommands = false
     @ObservationIgnored private var settleTask: Task<Void, Never>?
     @ObservationIgnored private var watchdog: Task<Void, Never>?
 
@@ -728,6 +848,13 @@ private final class TVSkylineRowNavigationModel {
         return focusableSectionIds.contains(sectionId)
     }
 
+    /// Entry and native focus-repair locks consume their originating remote
+    /// event. Only a deliberate row-to-row transaction accepts subsequent
+    /// presses into the adjacent-page queue.
+    var acceptsQueuedVerticalMoves: Bool {
+        isInFlight && acceptsQueuedMoveCommands
+    }
+
     /// Claim entry from chrome synchronously, before its focus request is
     /// published on the next render turn. tvOS can otherwise deliver the same
     /// Down command to the first row and immediately page it a second time.
@@ -739,7 +866,8 @@ private final class TVSkylineRowNavigationModel {
         startOperation(
             sectionId: sectionId,
             itemId: itemId,
-            expectsScroll: expectsScroll
+            expectsScroll: expectsScroll,
+            acceptsQueuedMoveCommands: false
         )
     }
 
@@ -754,7 +882,8 @@ private final class TVSkylineRowNavigationModel {
         let generation = startOperation(
             sectionId: sectionId,
             itemId: itemId,
-            expectsScroll: true
+            expectsScroll: true,
+            acceptsQueuedMoveCommands: true
         )
         publishFallback(generation: generation)
     }
@@ -772,7 +901,8 @@ private final class TVSkylineRowNavigationModel {
                 let generation = startOperation(
                     sectionId: sectionId,
                     itemId: itemId,
-                    expectsScroll: true
+                    expectsScroll: true,
+                    acceptsQueuedMoveCommands: false
                 )
                 confirmedSectionId = sectionId
                 targetFocusObserved = true
@@ -820,10 +950,10 @@ private final class TVSkylineRowNavigationModel {
         } else if !isScrollMoving {
             // A disabled outer ScrollView may omit a phase callback for its
             // programmatic animation. Keep the transaction alive beyond the
-            // 500 ms curve so the marquee retains live row geometry throughout.
+            // 600 ms curve so the marquee retains live row geometry throughout.
             scheduleSettledFinish(
                 generation: nextGeneration,
-                delay: .milliseconds(560)
+                delay: .milliseconds(670)
             )
         }
         return true
@@ -863,13 +993,15 @@ private final class TVSkylineRowNavigationModel {
         targetFocusObserved = false
         sawScrollMovement = false
         isScrollMoving = false
+        acceptsQueuedMoveCommands = false
         focusableSectionIds = Set([confirmedSectionId].compactMap { $0 })
     }
 
     private func startOperation(
         sectionId: String,
         itemId: String,
-        expectsScroll: Bool
+        expectsScroll: Bool,
+        acceptsQueuedMoveCommands: Bool
     ) -> Int {
         settleTask?.cancel()
         watchdog?.cancel()
@@ -881,6 +1013,7 @@ private final class TVSkylineRowNavigationModel {
         destinationSectionId = sectionId
         destinationItemId = itemId
         operationExpectsScroll = expectsScroll
+        self.acceptsQueuedMoveCommands = acceptsQueuedMoveCommands
         targetFocusObserved = false
         focusableSectionIds = Set([confirmedSectionId, sectionId].compactMap { $0 })
         // Native focus may have started panning before its move command
@@ -936,12 +1069,13 @@ private final class TVSkylineRowNavigationModel {
         isInFlight = false
         targetFocusObserved = false
         sawScrollMovement = false
+        acceptsQueuedMoveCommands = false
         focusableSectionIds = Set([confirmedSectionId].compactMap { $0 })
     }
 
     private func armWatchdog(for generation: Int) {
         watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(1200))
+            try? await Task.sleep(for: .milliseconds(1400))
             guard !Task.isCancelled else { return }
             self?.finish(generation: generation)
         }
@@ -1013,22 +1147,34 @@ private struct TVSkylineRowPositionReporter: ViewModifier {
     }
 }
 
-/// The adjacent row still travels by the native layout stride into its anchor.
-/// Once a row crosses the top side, extend that same interactive phase by the
-/// hero-band height: its header, posters, captions, and attached foreground
-/// then continue together until the entire page clears the physical screen.
-/// There is deliberately no opacity curve—the screen edge alone removes it.
-private struct TVSkylineRowScrollPresentation: ViewModifier {
+/// One pure transform is used by both the poster row and its separate marquee
+/// layer. The native scroll supplies the adjacent-row stride; crossing the
+/// integer boundary supplies the remaining hero-band travel through the top
+/// of the physical screen. There is no opacity curve or clipping shortcut.
+private enum TVSkylineRowPresentation {
+    static func topOverflowOffset(
+        topOverflowTravel: CGFloat,
+        rowIndex: CGFloat,
+        presentationBoundary: CGFloat
+    ) -> CGFloat {
+        let progress = min(max(presentationBoundary - rowIndex, 0), 1)
+        return -topOverflowTravel * progress
+    }
+}
+
+private struct TVSkylineRowOverflowPresentation: ViewModifier {
     let topOverflowTravel: CGFloat
+    let rowIndex: CGFloat
+    let presentationBoundary: CGFloat
 
     func body(content: Content) -> some View {
-        content.scrollTransition(.interactive, axis: .vertical) { row, phase in
-            row.offset(
-                y: phase.value < 0
-                    ? CGFloat(phase.value) * topOverflowTravel
-                    : 0
+        content.offset(
+            y: TVSkylineRowPresentation.topOverflowOffset(
+                topOverflowTravel: topOverflowTravel,
+                rowIndex: rowIndex,
+                presentationBoundary: presentationBoundary
             )
-        }
+        )
     }
 }
 
