@@ -1,4 +1,5 @@
 #if os(tvOS)
+import Foundation
 import SwiftUI
 
 /// Shared Skyline landing layout (§6.1): an ambient backdrop, a focus
@@ -7,10 +8,9 @@ import SwiftUI
 /// so the two stay pixel-identical — the only difference is the sections each
 /// feeds in.
 ///
-/// Row-to-row movement is resolved as one explicit adjacent-row transaction.
-/// The visual overflow used by the Plex-style strip intentionally differs
-/// from the focus engine's layout geometry, so allowing native Up/Down
-/// resolution would occasionally select a row below the one on screen.
+/// Row-to-row movement is coordinated as one adjacent-row transaction. Native
+/// focus gets the first chance to move; an exact programmatic target is used
+/// only when the visual overflow prevents the focus engine reaching that row.
 struct TVSkylineSectionFeed: View {
     /// Section rows to page through, in order (already filtered to
     /// non-empty, non-featured by the caller).
@@ -97,6 +97,7 @@ struct TVSkylineSectionFeed: View {
         .onChange(of: rowNavigation.isInFlight) { _, isInFlight in
             if !isInFlight {
                 outgoingMarquee = nil
+                rowMotion.stopTracking()
                 if !isTopMenuFocused {
                     // A watchdog completion means the destination never
                     // reported real focus. Restore ownership to the last
@@ -193,11 +194,12 @@ struct TVSkylineSectionFeed: View {
                     rowNavigation.setScrollMoving(phase != .idle)
                     if phase == .idle {
                         outgoingMarquee = nil
+                        rowMotion.stopTracking()
                     }
                 }
-                // Every vertical command names one exact row target. Drive
-                // the scroll and the destination card's focus request from
-                // the same generation so tvOS cannot settle on the row below.
+                // A blocked native move publishes one exact recovery target.
+                // Drive its scroll and card focus from the same generation so
+                // tvOS cannot settle on a different logical row.
                 .onChange(of: rowNavigation.request?.generation) { _, _ in
                     if let request = rowNavigation.request {
                         withAnimation(reduceMotion ? nil : TVSkylineRowNavigationModel.animation) {
@@ -233,10 +235,9 @@ struct TVSkylineSectionFeed: View {
             focusRequest: ownsRequest ? (request?.generation ?? 0) : 0,
             focusRequestItemId: ownsRequest ? request?.itemId : nil,
             detailReturnFocusRequest: detailReturnFocusRequest,
-            // The visual strip deliberately travels beyond its logical focus
-            // frames, so native geometric resolution is no longer a reliable
-            // row selector. Resolve one adjacent row explicitly in either
-            // direction; first-row Up still crosses into the top menu.
+            // Observe every directional boundary. Native focus moves first;
+            // the coordinator supplies a one-row fallback only when needed.
+            // First-row Up still crosses into the top menu.
             onMoveUp: { requestVerticalMove(delta: -1) },
             onItemFocus: { item in
                 acceptFocusedItem(item, in: section)
@@ -312,8 +313,8 @@ struct TVSkylineSectionFeed: View {
 
     /// Resolve one deterministic adjacent row. Returning to a row restores its
     /// last card; first entry uses the closest card index from the source row.
-    /// This replaces native geometric selection only for vertical boundaries—
-    /// horizontal movement remains entirely owned by each MediaRow.
+    /// Native vertical selection is retained when it succeeds; horizontal
+    /// movement remains entirely owned by each MediaRow.
     private func requestVerticalMove(delta: Int) {
         guard !rowNavigation.isInFlight,
               let sourceSectionId = rowNavigation.confirmedSectionId ?? focusedSectionId,
@@ -355,12 +356,12 @@ struct TVSkylineSectionFeed: View {
         // attached to the destination row's measured geometry, so its logo
         // and metadata enter with that row even if tvOS takes another frame
         // to complete the real focus claim.
-        previewFocusedItem(targetItem, in: destination)
-        focusRestorationOwnerSectionId = destination.id
-        rowNavigation.requestFocus(
+        rowNavigation.beginVerticalMove(
             sectionId: destination.id,
             itemId: targetItemId
         )
+        previewFocusedItem(targetItem, in: destination)
+        focusRestorationOwnerSectionId = destination.id
     }
 
     private func previewFocusedItem(_ item: SectionItem, in section: ResolvedSection) {
@@ -379,6 +380,12 @@ struct TVSkylineSectionFeed: View {
             outgoingMarquee = outgoing
         }
         focusedSectionId = section.id
+        if rowNavigation.isInFlight {
+            rowMotion.track(
+                liveSectionId: section.id,
+                outgoingSectionId: outgoing?.sectionId ?? outgoingMarquee?.sectionId
+            )
+        }
         marqueeModel.preview(
             candidate,
             neighborBackdropURLs: neighborBackdropURLs(around: item, in: section)
@@ -596,10 +603,9 @@ private struct TVSkylineOutgoingMarquee: Equatable {
     let snapshot: TVSkylineMarqueeSnapshot
 }
 
-/// One generation drives both halves of a vertical handoff: the containing
-/// ScrollView aligns `sectionId`, and that row's MediaRow claims `itemId`.
-/// Keeping the destination immutable prevents focus repair from retargeting a
-/// transition midway through its animation.
+/// When native focus needs recovery, one generation drives both halves: the
+/// containing ScrollView aligns `sectionId`, and that row's MediaRow claims
+/// `itemId`. The destination cannot change midway through the animation.
 private struct TVSkylineRowFocusRequest: Equatable {
     let generation: Int
     let sectionId: String
@@ -608,10 +614,10 @@ private struct TVSkylineRowFocusRequest: Equatable {
 }
 
 /// Serializes vertical navigation without observing ordinary horizontal
-/// focus changes in the feed's body. The lock ends only after the requested
-/// card has reported focus and any animated vertical scroll has become idle.
-/// A watchdog releases it if tvOS omits a scroll-phase callback, avoiding a
-/// permanently dead Up/Down path after an interrupted gesture.
+/// focus changes in the feed's body. Native focus gets a short first chance;
+/// the programmatic request is published only if it did not reach the named
+/// adjacent row. This avoids handling one remote press both natively and
+/// programmatically while retaining recovery for a blocked focus move.
 @Observable
 @MainActor
 private final class TVSkylineRowNavigationModel {
@@ -629,9 +635,16 @@ private final class TVSkylineRowNavigationModel {
     @ObservationIgnored private var nextGeneration = 0
     @ObservationIgnored private var lastFocusedItemIdBySectionId: [String: String] = [:]
     @ObservationIgnored private(set) var confirmedSectionId: String?
+    @ObservationIgnored private var lastObservedSectionId: String?
+    @ObservationIgnored private var lastObservedUptime: TimeInterval = 0
+    @ObservationIgnored private var destinationSectionId: String?
+    @ObservationIgnored private var destinationItemId: String?
+    @ObservationIgnored private var operationExpectsScroll = true
     @ObservationIgnored private var targetFocusObserved = false
     @ObservationIgnored private var sawScrollMovement = false
     @ObservationIgnored private var isScrollMoving = false
+    @ObservationIgnored private var fallbackTask: Task<Void, Never>?
+    @ObservationIgnored private var settleTask: Task<Void, Never>?
     @ObservationIgnored private var watchdog: Task<Void, Never>?
 
     func lastFocusedItemId(in sectionId: String) -> String? {
@@ -641,29 +654,49 @@ private final class TVSkylineRowNavigationModel {
     func seedConfirmedSection(_ sectionId: String) {
         if confirmedSectionId == nil {
             confirmedSectionId = sectionId
+            lastObservedSectionId = sectionId
         }
     }
 
+    /// Entry from chrome has no native row-to-row move to wait for, so issue
+    /// its exact focus/scroll request immediately.
     func requestFocus(
         sectionId: String,
         itemId: String,
         expectsScroll: Bool = true
     ) {
-        watchdog?.cancel()
-        nextGeneration &+= 1
-        targetFocusObserved = false
-        // Native focus may have already begun panning the ScrollView before
-        // its move command reaches the row handler. Preserve that phase so
-        // the following idle callback can finish this same transaction.
-        sawScrollMovement = isScrollMoving
-        isInFlight = true
-        request = TVSkylineRowFocusRequest(
-            generation: nextGeneration,
+        let generation = startOperation(
             sectionId: sectionId,
             itemId: itemId,
             expectsScroll: expectsScroll
         )
-        armWatchdog(for: nextGeneration)
+        publishFallback(generation: generation)
+    }
+
+    /// A remote Up/Down command may arrive after tvOS has already moved focus
+    /// to the adjacent row. Wait briefly for that native result; only a failed
+    /// move receives the imperative focus and scroll request.
+    func beginVerticalMove(sectionId: String, itemId: String) {
+        let generation = startOperation(
+            sectionId: sectionId,
+            itemId: itemId,
+            expectsScroll: true
+        )
+        fallbackTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(90))
+            guard !Task.isCancelled, let self,
+                  self.isInFlight,
+                  self.nextGeneration == generation else { return }
+
+            // A successful native move owns the scroll completely. Only a
+            // focus miss receives the imperative recovery; this is what keeps
+            // one physical press from producing two animations.
+            if !self.targetFocusObserved, !self.isScrollMoving {
+                self.publishFallback(generation: generation)
+            } else if !self.sawScrollMovement, !self.isScrollMoving {
+                self.scheduleSettledFinish(generation: generation)
+            }
+        }
     }
 
     /// Returns false for transient reports from the departing row while the
@@ -671,8 +704,10 @@ private final class TVSkylineRowNavigationModel {
     /// destination row confirms the handoff: `itemId` is the preferred claim,
     /// not a reason to strand the hero if tvOS selects a nearby valid card.
     func acceptFocus(sectionId: String, itemId: String) -> Bool {
+        lastObservedSectionId = sectionId
+        lastObservedUptime = ProcessInfo.processInfo.systemUptime
         lastFocusedItemIdBySectionId[sectionId] = itemId
-        guard isInFlight, let request else {
+        guard isInFlight, let destinationSectionId else {
             // All cross-row movement is explicit. Once a row is confirmed,
             // a late focus repair from the departing row is stale rather than
             // a new navigation event; horizontal reports in the live row are
@@ -683,12 +718,24 @@ private final class TVSkylineRowNavigationModel {
             confirmedSectionId = sectionId
             return true
         }
-        guard request.sectionId == sectionId else { return false }
+        guard destinationSectionId == sectionId else {
+            let lostDestination = targetFocusObserved
+            targetFocusObserved = false
+            settleTask?.cancel()
+            settleTask = nil
+            if lostDestination {
+                publishFallback(generation: nextGeneration)
+            }
+            return false
+        }
 
         confirmedSectionId = sectionId
+        destinationItemId = itemId
         targetFocusObserved = true
-        if !request.expectsScroll || (sawScrollMovement && !isScrollMoving) {
-            finish(generation: request.generation)
+        if !operationExpectsScroll {
+            finish(generation: nextGeneration)
+        } else if sawScrollMovement && !isScrollMoving {
+            scheduleSettledFinish(generation: nextGeneration)
         }
         return true
     }
@@ -698,28 +745,108 @@ private final class TVSkylineRowNavigationModel {
         guard isInFlight else { return }
         if moving {
             sawScrollMovement = true
-        } else if sawScrollMovement,
-                  targetFocusObserved,
-                  let generation = request?.generation {
-            finish(generation: generation)
+        } else if targetFocusObserved {
+            if sawScrollMovement {
+                scheduleSettledFinish(generation: nextGeneration)
+            }
+        } else {
+            // A native scroll that did not land on the requested adjacent row
+            // is allowed to settle before recovery starts, avoiding two
+            // vertical animators fighting over the same ScrollView.
+            publishFallback(generation: nextGeneration)
         }
     }
 
     func cancel() {
+        fallbackTask?.cancel()
+        settleTask?.cancel()
         watchdog?.cancel()
+        fallbackTask = nil
+        settleTask = nil
         watchdog = nil
         request = nil
+        destinationSectionId = nil
+        destinationItemId = nil
         isInFlight = false
         targetFocusObserved = false
         sawScrollMovement = false
         isScrollMoving = false
     }
 
-    private func finish(generation: Int) {
-        guard request?.generation == generation else { return }
+    private func startOperation(
+        sectionId: String,
+        itemId: String,
+        expectsScroll: Bool
+    ) -> Int {
+        fallbackTask?.cancel()
+        settleTask?.cancel()
         watchdog?.cancel()
+        fallbackTask = nil
+        settleTask = nil
+        watchdog = nil
+
+        nextGeneration &+= 1
+        request = nil
+        destinationSectionId = sectionId
+        destinationItemId = itemId
+        operationExpectsScroll = expectsScroll
+        // A focus report can precede the row's move-command callback. Accept
+        // it only inside the same short event window, so an old rejected
+        // repair cannot masquerade as the result of a later reverse command.
+        let focusWasJustObserved = ProcessInfo.processInfo.systemUptime - lastObservedUptime < 0.12
+        targetFocusObserved = lastObservedSectionId == sectionId && focusWasJustObserved
+        if targetFocusObserved {
+            confirmedSectionId = sectionId
+        }
+        // Native focus may have started panning before its move command
+        // reached the row handler. Preserve that phase for the idle handshake.
+        sawScrollMovement = isScrollMoving
+        isInFlight = true
+        armWatchdog(for: nextGeneration)
+        return nextGeneration
+    }
+
+    private func publishFallback(generation: Int) {
+        guard isInFlight,
+              nextGeneration == generation,
+              request == nil,
+              let destinationSectionId,
+              let destinationItemId else { return }
+        request = TVSkylineRowFocusRequest(
+            generation: generation,
+            sectionId: destinationSectionId,
+            itemId: destinationItemId,
+            expectsScroll: operationExpectsScroll
+        )
+    }
+
+    /// Give the focus engine one final frame after scroll idle to publish any
+    /// repair. Without this grace, a late bounce can arrive just after the
+    /// lock clears and make the following command start from the wrong row.
+    private func scheduleSettledFinish(generation: Int) {
+        settleTask?.cancel()
+        settleTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled, let self,
+                  self.isInFlight,
+                  self.nextGeneration == generation,
+                  self.targetFocusObserved,
+                  !self.isScrollMoving else { return }
+            self.finish(generation: generation)
+        }
+    }
+
+    private func finish(generation: Int) {
+        guard isInFlight, nextGeneration == generation else { return }
+        fallbackTask?.cancel()
+        settleTask?.cancel()
+        watchdog?.cancel()
+        fallbackTask = nil
+        settleTask = nil
         watchdog = nil
         request = nil
+        destinationSectionId = nil
+        destinationItemId = nil
         isInFlight = false
         targetFocusObserved = false
         sawScrollMovement = false
@@ -727,7 +854,7 @@ private final class TVSkylineRowNavigationModel {
 
     private func armWatchdog(for generation: Int) {
         watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(650))
+            try? await Task.sleep(for: .milliseconds(850))
             guard !Task.isCancelled else { return }
             self?.finish(generation: generation)
         }
@@ -744,14 +871,38 @@ private enum TVSkylineRowMotionCoordinateSpace {
 @Observable
 @MainActor
 private final class TVSkylineRowMotionModel {
+    @ObservationIgnored private var cachedRowMinYBySectionId: [String: CGFloat] = [:]
+    @ObservationIgnored private var trackedSectionIds: Set<String> = []
     private(set) var rowMinYBySectionId: [String: CGFloat] = [:]
+
+    /// Publish only the two coordinates that can move visible foregrounds.
+    /// Other mounted rows continue filling the non-observed cache for a later
+    /// transition without invalidating the hero several times per frame.
+    func track(liveSectionId: String?, outgoingSectionId: String?) {
+        trackedSectionIds = Set([liveSectionId, outgoingSectionId].compactMap { $0 })
+        let trackedPositions = trackedSectionIds.reduce(into: [String: CGFloat]()) { result, id in
+            result[id] = cachedRowMinYBySectionId[id]
+        }
+        if trackedPositions != rowMinYBySectionId {
+            rowMinYBySectionId = trackedPositions
+        }
+    }
+
+    func stopTracking() {
+        trackedSectionIds.removeAll(keepingCapacity: true)
+        if !rowMinYBySectionId.isEmpty {
+            rowMinYBySectionId = [:]
+        }
+    }
 
     func update(sectionId: String, minY: CGFloat) {
         guard minY.isFinite else { return }
-        if let previous = rowMinYBySectionId[sectionId],
+        if let previous = cachedRowMinYBySectionId[sectionId],
            abs(previous - minY) < 0.25 {
             return
         }
+        cachedRowMinYBySectionId[sectionId] = minY
+        guard trackedSectionIds.contains(sectionId) else { return }
         rowMinYBySectionId[sectionId] = minY
     }
 }
