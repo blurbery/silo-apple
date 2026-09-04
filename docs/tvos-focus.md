@@ -91,10 +91,10 @@ The Skyline pager must behave as one presentation system:
 - Do not put the row pages in an outer vertical `ScrollView`. Do not use
   vertical `scrollTo`, `onScrollPhaseChange`, position reporting, or
   scroll-settle/watchdog timers to drive a page transition.
-- Keep only the settled row and its immediate neighbours mounted in a
-  non-lazy vertical window during phase one. Keep horizontal card collections
-  lazy. A future continuous-hold implementation may widen the mounted window;
-  it must not unmount the focus owner or move focus midway through a flight.
+- At rest, keep only the settled row and its immediate neighbours mounted in a
+  non-lazy vertical window. Keep horizontal card collections lazy. Bounded
+  rapid input may widen that window only far enough to cover its queued path;
+  it must not unmount the focus owner or move focus midway through a chain.
 - Bundle each page's cards, header, and foreground marquee into the same
   transformed presentation layer. Each mounted page owns presentation state
   that is retained and frozen while it travels; do not create a separate
@@ -103,6 +103,12 @@ The Skyline pager must behave as one presentation system:
   loading and accessibility. Reuse the marquee's live-presentation and logo
   loading gates for that distinction. Keep one shared backdrop pipeline
   outside the page window.
+- The poster strip draws above its page-local foreground. An incoming page's
+  foreground reveals from behind that strip from `0...1` while the outgoing
+  foreground remains fully revealed. Derive that reveal from the same flight,
+  duration, curve, and animation transaction as the page offset so the cards
+  and foreground land on the same frame. A cold logo may use the text title
+  until rest, but artwork readiness must never gate or alter the reveal.
 - Drive the window with one animated presentation value. Every page position
   and the window translation must read from the same frozen anchor table so
   the row and its foreground cannot acquire different offsets.
@@ -159,9 +165,11 @@ row's clamped target:
   not overwrite the sticky column. Returning to a longer row must restore the
   original horizontal position.
 - After horizontal focus rests for approximately 80 ms, pre-position both
-  mounted adjacent rails at the sticky column with
-  `Transaction(animation: nil)`. This work happens at horizontal rest, not on
-  the first frame of a vertical flight.
+  mounted adjacent rails at the sticky column through a bound `ScrollPosition`
+  with `Transaction(animation: nil)`. Use the same content-margin-aware anchor
+  as the native focus reveal so focus landing cannot add a corrective snap.
+  This work happens at horizontal rest, not on the first frame of a vertical
+  flight.
 - Track readiness by `(sectionId, stickyColumn, itemsVersion)` and associate it
   with the mounted rail's instance generation. A section refresh invalidates
   readiness even when the requested column is unchanged. Unmounting a rail or
@@ -186,27 +194,31 @@ Treat destination readiness as one composite condition: the row has a measured
 height for its current layout signature, and its current rail instance has
 acknowledged the sticky-column target. Do not begin a flight or consume a
 pending command until that complete condition is true. Commands received while
-preflight preparation is pending replace or cancel the pending intent under the
-same one-command collapse rules.
+preflight preparation is pending use the same bounded queue and cancellation
+rules as commands received during a flight.
 
 ### Motion and focus handoff
 
-Phase one supports one adjacent flight, interruptible reversal, and one
-replaceable pending adjacent command. Interpret each new command against the
-active source and destination endpoints, not against the previous command:
+Skyline supports one adjacent flight at a time, interruptible reversal, and a
+small bounded queue of deliberate remote events. Interpret each new command
+against the active source, destination and queued endpoint:
 
-- A command beyond the currently targeted destination becomes the one pending
-  command. Repeating that direction replaces, rather than appends to, it.
-- A command opposite an existing pending command cancels the pending command
-  and leaves the active flight targeted at its current endpoint.
+- A same-direction command appends one additional row while the projected
+  destination remains in bounds and the queue remains below its cap.
+- A command opposite the last queued command cancels that queued command rather
+  than adding another move.
 - With no pending command, a command selecting the other mounted endpoint
   retargets the active presentation immediately. This includes returning to
   the source and retargeting the destination again while a reversal is active.
-- Consume a pending command only after the current endpoint has reported real
-  focus and become the settled source for the next adjacent flight.
+- When an animation reaches its destination, rebase and start the next prepared
+  queued move from the `.removed` completion on the same main-actor turn. Do
+  not insert focus, backdrop, logo, or arbitrary settle padding between moves.
+- Widen the mounted window only far enough to retain the real focus owner and
+  prepare the bounded queued destinations. Claim destination focus once when
+  the queue drains.
 
-Do not keep an array of remote events. This phase does not promise unlimited
-multi-row retargeting while only three rows are mounted.
+Never allow an unbounded hold to mount the entire feed or retain an unlimited
+array of remote events.
 
 During a flight:
 
@@ -222,9 +234,10 @@ During a flight:
 - Use `completionCriteria: .removed`, not `.logicallyComplete`. Rebasing while
   a spring tail is still moving creates a visible final hop.
 - After the latest flight is fully removed, perform the non-animated rebase,
-  enable the prepared destination, and issue one focus request. Retire source
-  ownership only after the destination reports real focus. Do not perform
-  mid-flight focus repairs.
+  expose only the prepared destination card, and issue one focus request after
+  the queue drains. Retire source ownership only after the destination reports
+  real focus, then expose the rest of that row. Do not let tvOS briefly choose
+  card zero and do not perform mid-flight focus repairs.
 
 The normal path has one post-rebase focus request. Give its matching generation
 a bounded confirmation window. If the prepared target remains valid but the
@@ -330,6 +343,15 @@ times with warmed artwork. The acceptance criteria are:
 
 Run additional physical-device visual checks outside the performance sequence:
 
+- Move ten cards right on a long row, click Down, then Up. Both rows must land
+  at the sticky column and returning to the long row must restore column ten,
+  even when the intervening row clamps to a shorter length.
+- Clear the image caches with the debug launch argument, then click Down onto a
+  row whose logo is cold. The foreground fallback and page flight must begin on
+  schedule; logo and backdrop readiness must not gate input.
+- Click Down three times rapidly, then Up once. The Up cancels the most recent
+  queued Down, so the chain ends two rows below its source rather than treating
+  Up as a fourth move or dropping it.
 - From a long row, establish a sticky column beyond the end of a short
   adjacent row, move into the short row, then return. The short-row clamp must
   not overwrite the preferred column.
