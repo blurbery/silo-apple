@@ -140,6 +140,14 @@ index together in one transaction with animation disabled. A layout-signature
 change while already at rest is also a non-animated rebase; returning from a
 Settings preference change must never look like a row flight.
 
+Bounded queuing has one narrow extension to that rule. At an integer logical
+landing, a newly mounted, still-offscreen queued page may append its measured
+extent to the flight's table before it becomes the next target. Existing
+frozen entries remain immutable, and the appended boundary must not participate
+in the current page's zero-offset equation. This lets the next transaction use
+an exact distance without applying the pending table or moving any onscreen
+pixel during the retained physical tail.
+
 For a frozen cumulative-anchor function `anchor`, interpolate between adjacent
 anchors for a fractional presentation index and calculate every page with the
 same expression:
@@ -239,6 +247,12 @@ During a flight:
   an eligible first-visible-card fallback. Retire source ownership only after
   the destination reports real focus, then expose the rest of that row on the
   same state change.
+- Change row/card eligibility without replacing the Button subtree. Do not add
+  `.focusable(true)` to an enabled `.card` Button: that creates a second focus
+  target and removes the native lift and reliable FocusState reporting on
+  hardware. Keep the original Button as the focus target and change its enabled
+  state non-structurally; verify that parked rows do not acquire disabled
+  dimming while they travel.
 - Use `.removed` only for the non-animated geometric rebase and pending-height
   table swap. Rebasing at `.logicallyComplete` while a spring tail is still
   moving creates a visible final hop; delaying the focus claim until `.removed`

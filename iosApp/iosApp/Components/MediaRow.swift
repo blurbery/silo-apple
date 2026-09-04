@@ -770,13 +770,14 @@ struct TVRowMoveHandler: ViewModifier {
 /// Exclude locked rows without wrapping enabled Buttons in another focusable
 /// view. Keep the modifier structurally present when eligibility changes: an
 /// `if` here replaces the card subtree at every handoff, which can rebuild a
-/// whole rail on the main thread. Applying the Boolean form directly retains
-/// the Button and its `.card` identity while updating only focus eligibility.
+/// whole rail on the main thread. Disabling the existing Button retains its
+/// identity and native `.card` focus surface; adding `.focusable(true)` here
+/// instead creates a second focus target that steals lift and focus reporting.
 struct TVRowFocusEligibility: ViewModifier {
     let isEnabled: Bool
 
     func body(content: Content) -> some View {
-        content.focusable(isEnabled)
+        content.disabled(!isEnabled)
     }
 }
 
