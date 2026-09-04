@@ -79,6 +79,7 @@ struct TVSkylineSectionFeed: View {
                             isLivePresentation: isLivePresentation(section.id),
                             allowsLogoLoading: shouldLoadLogo(section.id),
                             isFocusEnabled: isFocusEnabled(section.id),
+                            restrictsFocusToRequestedItem: restrictsFocusToRequestedItem(section.id),
                             prefersDefaultFocus: isSettled && index == 0,
                             focusRequest: focusRequestSectionId == section.id ? rowFocusRequestToken : 0,
                             focusRequestItemId: focusRequestSectionId == section.id ? focusRequestItemId : nil,
@@ -686,6 +687,11 @@ struct TVSkylineSectionFeed: View {
         return sectionId == focusRestorationOwnerSectionId
     }
 
+    private func restrictsFocusToRequestedItem(_ sectionId: String) -> Bool {
+        guard let flight else { return false }
+        return flight.isAwaitingFocus && flight.destinationId == sectionId
+    }
+
     private func isLivePresentation(_ sectionId: String) -> Bool {
         isSettled && sectionId == confirmedSectionId
     }
@@ -1065,6 +1071,7 @@ private struct TVSkylineRowPage: View {
     let isLivePresentation: Bool
     let allowsLogoLoading: Bool
     let isFocusEnabled: Bool
+    let restrictsFocusToRequestedItem: Bool
     let prefersDefaultFocus: Bool
     let focusRequest: Int
     let focusRequestItemId: String?
@@ -1105,6 +1112,7 @@ private struct TVSkylineRowPage: View {
                 detailReturnFocusRequest: detailReturnFocusRequest,
                 isFocusEnabled: isFocusEnabled,
                 usesPreparedOneShotFocusRequest: true,
+                restrictsFocusToRequestedItem: restrictsFocusToRequestedItem,
                 railPreparation: railPreparation,
                 onRailMounted: onRailMounted,
                 onRailUnmounted: onRailUnmounted,

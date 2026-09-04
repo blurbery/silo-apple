@@ -71,6 +71,10 @@ struct MediaRow: View {
     /// handoff. This path writes FocusState once and deliberately skips the
     /// legacy scroll-and-repair loop used by unrelated screens.
     var usesPreparedOneShotFocusRequest: Bool = false
+    /// While Skyline is accepting its prepared destination claim, expose only
+    /// that exact mounted card. The pager turns this off in the same state
+    /// change that accepts focus, restoring native Left/Right immediately.
+    var restrictsFocusToRequestedItem: Bool = false
     /// Optional no-animation horizontal placement requested by Skyline.
     var railPreparation: TVMediaRailPreparation? = nil
     var onRailMounted: ((UUID) -> Void)? = nil
@@ -452,9 +456,9 @@ struct MediaRow: View {
             preparedRailPosition.scrollTo(id: request.itemId, anchor: .center)
         }
 
-        // The bound position is the source of truth. Two render turns let the
-        // lazy target mount and let ScrollView apply the requested anchor
-        // before readiness is published to Skyline.
+        // The bound position is the source of truth. One render turn lets the
+        // lazy target mount and ScrollView apply the requested anchor before
+        // readiness is published to Skyline.
         acknowledgeRailPreparationAfterLayout(request)
     }
 
@@ -466,7 +470,6 @@ struct MediaRow: View {
 
     private func acknowledgeRailPreparationAfterLayout(_ request: TVMediaRailPreparation) {
         Task { @MainActor in
-            await Task.yield()
             await Task.yield()
             acknowledgeRailPreparationIfReady(request)
         }
@@ -547,8 +550,7 @@ struct MediaRow: View {
     /// scrolling there before the explicit sticky-column focus claim lands.
     private func itemIsFocusEnabled(_ itemId: String) -> Bool {
         guard isFocusEnabled else { return false }
-        guard usesPreparedOneShotFocusRequest,
-              focusRequest > 0,
+        guard restrictsFocusToRequestedItem,
               let focusRequestItemId else { return true }
         return itemId == focusRequestItemId
     }

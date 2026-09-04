@@ -39,6 +39,7 @@ struct SectionRow: View {
     /// Skyline-only prepared handoff and rail-mount telemetry. Defaults keep
     /// every other SectionRow on the existing focus path.
     var usesPreparedOneShotFocusRequest: Bool = false
+    var restrictsFocusToRequestedItem: Bool = false
     var railPreparation: TVMediaRailPreparation? = nil
     var onRailMounted: ((UUID) -> Void)? = nil
     var onRailUnmounted: ((UUID) -> Void)? = nil
@@ -129,6 +130,7 @@ struct SectionRow: View {
             detailReturnFocusRequest: detailReturnFocusRequest,
             isFocusEnabled: isFocusEnabled,
             usesPreparedOneShotFocusRequest: usesPreparedOneShotFocusRequest,
+            restrictsFocusToRequestedItem: restrictsFocusToRequestedItem,
             railPreparation: railPreparation,
             onRailMounted: onRailMounted,
             onRailUnmounted: onRailUnmounted,
