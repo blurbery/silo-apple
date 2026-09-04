@@ -1,7 +1,9 @@
 name: PR 237 tvOS simulator app
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - test/tvos-pr-237-simulator
 
 permissions:
   contents: read
