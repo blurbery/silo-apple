@@ -52,6 +52,15 @@ struct TVSkylineSectionFeed: View {
     /// The row that owns card focus or its context-menu dismissal flow. Unlike
     /// the marquee preview, this is cleared when focus moves into chrome.
     @State private var focusRestorationOwnerSectionId: String?
+    /// Last row that reported real card focus. Horizontal movement stays an
+    /// immediate marquee update; a different row starts the coordinated
+    /// vertical presentation without taking ownership away from native focus.
+    @State private var focusedSectionId: String?
+    /// Monotonic identity for interruptible row transitions. The renderer
+    /// keeps only the latest incoming/outgoing pair, so rapid presses never
+    /// accumulate presentation layers or delayed work.
+    @State private var rowTransitionGeneration = 0
+    @State private var rowTransition: TVSkylineRowTransition?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -67,7 +76,11 @@ struct TVSkylineSectionFeed: View {
                 .ignoresSafeArea(edges: .bottom)
 
             // Floats over the band above the row; never focusable or hit-testable.
-            TVSkylineMarquee(model: marqueeModel, scale: marqueeScale)
+            TVSkylineMarquee(
+                model: marqueeModel,
+                scale: marqueeScale,
+                rowTransition: rowTransition
+            )
             .offset(y: ContinuumTheme.Skyline.landingContentVerticalOffset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -124,6 +137,11 @@ struct TVSkylineSectionFeed: View {
                         ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                             featuredRow(section, isFirstRow: index == 0)
                                 .fixedSize(horizontal: false, vertical: true)
+                                // Native scrolling supplies the movement. A
+                                // whole-row opacity treatment softens the top
+                                // viewport edge without transforming card
+                                // geometry or splitting artwork from chrome.
+                                .modifier(TVSkylineRowScrollPresentation())
                                 .id(section.id)
                         }
                     }
@@ -234,13 +252,52 @@ struct TVSkylineSectionFeed: View {
     }
 
     private func previewFocusedItem(_ item: SectionItem, in section: ResolvedSection) {
+        let candidate = TVMarqueeContent(
+            item: item,
+            rowTitle: section.title,
+            isContinueWatching: section.isContinueWatchingSection
+        )
+        let transition = makeRowTransition(
+            to: section.id,
+            outgoingContent: marqueeModel.content,
+            outgoingEnrichment: marqueeModel.enrichment
+        )
+
+        focusedSectionId = section.id
         marqueeModel.preview(
-            TVMarqueeContent(
-                item: item,
-                rowTitle: section.title,
-                isContinueWatching: section.isContinueWatchingSection
-            ),
+            candidate,
             neighborBackdropURLs: neighborBackdropURLs(around: item, in: section)
+        )
+        if let transition {
+            rowTransitionGeneration &+= 1
+            rowTransition = TVSkylineRowTransition(
+                generation: rowTransitionGeneration,
+                direction: transition.direction,
+                outgoing: transition.outgoing
+            )
+        }
+    }
+
+    /// Builds a presentation request only for a genuine row boundary. The
+    /// focus engine has already selected the destination card, and the live
+    /// scroll view continues to own all layout, hit testing, and movement.
+    private func makeRowTransition(
+        to destinationSectionId: String,
+        outgoingContent: TVMarqueeContent?,
+        outgoingEnrichment: TVMarqueeEnrichment?
+    ) -> (direction: TVSkylineRowTransition.Direction, outgoing: TVSkylineMarqueeSnapshot)? {
+        guard let sourceSectionId = focusedSectionId,
+              sourceSectionId != destinationSectionId,
+              let sourceIndex = sections.firstIndex(where: { $0.id == sourceSectionId }),
+              let destinationIndex = sections.firstIndex(where: { $0.id == destinationSectionId }),
+              let outgoingContent else { return nil }
+
+        return (
+            destinationIndex > sourceIndex ? .down : .up,
+            TVSkylineMarqueeSnapshot(
+                content: outgoingContent,
+                enrichment: outgoingEnrichment
+            )
         )
     }
 
@@ -315,13 +372,156 @@ private struct TVSkylineBackdrop: View {
 private struct TVSkylineMarquee: View {
     let model: TVFocusMarqueeModel
     let scale: TVFocusMarquee.Scale
+    let rowTransition: TVSkylineRowTransition?
+
+    @State private var outgoing: TVSkylineMarqueeSnapshot?
+    @State private var outgoingOffset: CGFloat = 0
+    @State private var outgoingOpacity = 0.0
+    @State private var incomingOffset: CGFloat = 0
+    @State private var incomingOpacity = 1.0
+    @State private var activeGeneration = 0
+    @State private var transitionTask: Task<Void, Never>?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TVFocusMarquee(
-            content: model.content,
-            enrichment: model.enrichment,
-            scale: scale
-        )
+        ZStack {
+            if let outgoing {
+                TVFocusMarquee(
+                    content: outgoing.content,
+                    enrichment: outgoing.enrichment,
+                    scale: scale,
+                    isLivePresentation: false
+                )
+                .offset(y: outgoingOffset)
+                .opacity(outgoingOpacity)
+            }
+
+            TVFocusMarquee(
+                content: model.content,
+                enrichment: model.enrichment,
+                scale: scale
+            )
+            .offset(y: incomingOffset)
+            .opacity(incomingOpacity)
+        }
+        .onChange(of: rowTransition?.generation) { _, _ in
+            guard let rowTransition else { return }
+            begin(rowTransition)
+        }
+        .onDisappear {
+            transitionTask?.cancel()
+            transitionTask = nil
+        }
+    }
+
+    /// At most two foreground frames exist. A new row change cancels the
+    /// cleanup for the prior one, replaces its snapshot, and retargets the
+    /// same presentation properties instead of queuing another animation.
+    private func begin(_ transition: TVSkylineRowTransition) {
+        transitionTask?.cancel()
+        activeGeneration = transition.generation
+
+        var setup = Transaction()
+        setup.disablesAnimations = true
+        withTransaction(setup) {
+            outgoing = transition.outgoing
+            outgoingOffset = 0
+            outgoingOpacity = reduceMotion ? 0 : 1
+            incomingOffset = reduceMotion ? 0 : transition.direction.incomingOffset
+            incomingOpacity = reduceMotion ? 1 : TVSkylineRowTransition.incomingStartOpacity
+        }
+
+        guard !reduceMotion else {
+            outgoing = nil
+            return
+        }
+
+        let generation = transition.generation
+        transitionTask = Task { @MainActor in
+            // Commit the starting frame before driving both layers toward
+            // their destinations. Yielding never delays content selection or
+            // focus; it only establishes the transition's visual origin.
+            await Task.yield()
+            guard !Task.isCancelled, activeGeneration == generation else { return }
+
+            withAnimation(TVSkylineRowTransition.animation) {
+                outgoingOffset = transition.direction.outgoingOffset
+                outgoingOpacity = 0
+                incomingOffset = 0
+                incomingOpacity = 1
+            }
+
+            do {
+                try await Task.sleep(for: .seconds(TVSkylineRowTransition.duration))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, activeGeneration == generation else { return }
+
+            var cleanup = Transaction()
+            cleanup.disablesAnimations = true
+            withTransaction(cleanup) {
+                outgoing = nil
+                outgoingOffset = 0
+                outgoingOpacity = 0
+                incomingOffset = 0
+                incomingOpacity = 1
+            }
+            transitionTask = nil
+        }
+    }
+}
+
+/// Immutable foreground frame retained only for the outgoing half of a row
+/// transition. Backdrop state deliberately stays in `TVFocusMarqueeModel` and
+/// never enters this presentation stack.
+private struct TVSkylineMarqueeSnapshot: Equatable {
+    let content: TVMarqueeContent
+    let enrichment: TVMarqueeEnrichment?
+}
+
+private struct TVSkylineRowTransition: Equatable {
+    enum Direction: Equatable {
+        case up
+        case down
+
+        var incomingOffset: CGFloat {
+            switch self {
+            case .up: -TVSkylineRowTransition.travel
+            case .down: TVSkylineRowTransition.travel
+            }
+        }
+
+        var outgoingOffset: CGFloat { -incomingOffset }
+    }
+
+    static let duration = 0.36
+    static let travel: CGFloat = 112
+    static let incomingStartOpacity = 0.18
+    static let animation = Animation.timingCurve(
+        0.16, 1.0,
+        0.30, 1.0,
+        duration: duration
+    )
+
+    let generation: Int
+    let direction: Direction
+    let outgoing: TVSkylineMarqueeSnapshot
+}
+
+/// Fades a departing row before the vertical scroll viewport clips it, while
+/// leaving the incoming lower-row preview legible. This is a render-only
+/// effect on the complete row; layout and focus frames remain native.
+private struct TVSkylineRowScrollPresentation: ViewModifier {
+    func body(content: Content) -> some View {
+        content.scrollTransition(.interactive, axis: .vertical) { row, phase in
+            row.opacity(
+                phase.value < 0
+                    ? max(0, 1 + phase.value)
+                    : max(0.72, 1 - 0.28 * phase.value)
+            )
+        }
     }
 }
 

@@ -1,0 +1,72 @@
+name: tvOS row transition simulator app
+
+on:
+  push:
+    branches:
+      - feature/tvos-plex-row-transition
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.3"
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/xcodegen.zip \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.43.0/xcodegen.zip
+          echo "a4847ed77d3341a4d24049bc4424a3babca4c94ff1dcaaee923eaca2b32c678f  /tmp/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen-dist
+          /tmp/xcodegen-dist/xcodegen/bin/xcodegen generate --spec iosApp/project.yml
+
+      - name: Build signed tvOS simulator app
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          xcodebuild build \
+            -project iosApp/Silo.xcodeproj \
+            -scheme SiloTV \
+            -configuration Release \
+            -destination 'generic/platform=tvOS Simulator' \
+            -derivedDataPath /tmp/silo-tvos-simulator \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGN_IDENTITY=- \
+            | tee /tmp/SiloTV-row-transition-build.log
+
+      - name: Verify and package app
+        run: |
+          set -euo pipefail
+          app=/tmp/silo-tvos-simulator/Build/Products/Release-appletvsimulator/SiloTV.app
+          test -d "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")" = \
+            org.siloserver.silo
+          codesign --verify --deep --strict "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$app" \
+            /tmp/SiloTV-row-transition-simulator.zip
+          shasum -a 256 /tmp/SiloTV-row-transition-simulator.zip \
+            > /tmp/SiloTV-row-transition-simulator.sha256
+          git rev-parse HEAD > /tmp/SiloTV-row-transition-simulator.commit
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SiloTV-row-transition-simulator
+          path: |
+            /tmp/SiloTV-row-transition-simulator.zip
+            /tmp/SiloTV-row-transition-simulator.sha256
+            /tmp/SiloTV-row-transition-simulator.commit
+            /tmp/SiloTV-row-transition-build.log
+          if-no-files-found: error
+          retention-days: 3

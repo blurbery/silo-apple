@@ -1057,6 +1057,10 @@ struct TVFocusMarquee: View {
     let content: TVMarqueeContent?
     var enrichment: TVMarqueeEnrichment? = nil
     let scale: Scale
+    /// False only for the short-lived outgoing row snapshot. It may reuse a
+    /// cached logo, but must not restart logo fetches or VoiceOver announcements
+    /// while the newly focused content is already doing that live work.
+    var isLivePresentation = true
 
     @State private var continueWatchingMetadata = TVContinueWatchingPlaybackMetadataStore.shared
 
@@ -1067,7 +1071,8 @@ struct TVFocusMarquee: View {
                     content: content,
                     enrichment: enrichment,
                     badgeOverride: playbackBadgeOverride(for: content),
-                    scale: scale
+                    scale: scale,
+                    allowsLogoLoading: isLivePresentation
                 )
                     .id(content.id)
                     .transition(.identity)
@@ -1086,11 +1091,14 @@ struct TVFocusMarquee: View {
         // Cached foreground content should replace the previous selection
         // immediately; only the separate backdrop owns a crossfade.
         .transaction { $0.animation = nil }
+        .accessibilityHidden(!isLivePresentation)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits(.updatesFrequently)
         .task(id: content?.id) {
-            guard let content, UIAccessibility.isVoiceOverRunning else { return }
+            guard isLivePresentation,
+                  let content,
+                  UIAccessibility.isVoiceOverRunning else { return }
             try? await Task.sleep(for: .milliseconds(ContinuumTheme.Skyline.marqueeRestDebounceMilliseconds))
             guard !Task.isCancelled else { return }
             announce(content)
@@ -1145,6 +1153,7 @@ private struct TVMarqueeBlock: View {
     var enrichment: TVMarqueeEnrichment? = nil
     var badgeOverride: [String]? = nil
     let scale: TVFocusMarquee.Scale
+    let allowsLogoLoading: Bool
 
     /// Server logo art, swapped in only once decoded — the text title
     /// renders immediately while an uncached logo loads.
@@ -1158,12 +1167,14 @@ private struct TVMarqueeBlock: View {
         content: TVMarqueeContent,
         enrichment: TVMarqueeEnrichment? = nil,
         badgeOverride: [String]? = nil,
-        scale: TVFocusMarquee.Scale
+        scale: TVFocusMarquee.Scale,
+        allowsLogoLoading: Bool = true
     ) {
         self.content = content
         self.enrichment = enrichment
         self.badgeOverride = badgeOverride
         self.scale = scale
+        self.allowsLogoLoading = allowsLogoLoading
         // A prefetched logo should be on the block's very first frame —
         // waiting for onAppear paints one frame of text title first, which
         // reads as a flash on cold entry. Synchronous memory-cache lookup.
@@ -1194,7 +1205,11 @@ private struct TVMarqueeBlock: View {
             badgeLine
         }
         .frame(maxWidth: ContinuumTheme.Skyline.marqueeContentWidth, alignment: .leading)
-        .onAppear { loadLogoIfCached() }
+        .onAppear {
+            if allowsLogoLoading {
+                loadLogoIfCached()
+            }
+        }
         .onDisappear {
             logoTask?.cancel()
             logoTask = nil
