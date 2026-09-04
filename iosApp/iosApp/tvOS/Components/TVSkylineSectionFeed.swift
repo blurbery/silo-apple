@@ -70,6 +70,7 @@ struct TVSkylineSectionFeed: View {
     @State private var queuedVerticalMoves: [Int] = []
 
     private static let maximumQueuedVerticalMoves = 8
+    private static let adjacentLogoWarmupDelayMilliseconds = 80
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -87,7 +88,11 @@ struct TVSkylineSectionFeed: View {
                 sectionIds: sections.map(\.id),
                 focusedSectionId: focusedSectionId,
                 outgoing: outgoingMarquee,
-                isTransitioning: rowNavigation.isInFlight,
+                // Reduced Motion swaps pages without a travelling foreground.
+                // The row viewport is clipped in that mode below, so the old
+                // posters and marquee cannot remain painted over the hero.
+                isTransitioning: rowNavigation.isInFlight && !reduceMotion,
+                reduceMotion: reduceMotion,
                 presentationBoundary: rowPresentationBoundary
             )
 
@@ -117,10 +122,10 @@ struct TVSkylineSectionFeed: View {
                 outgoingMarquee = nil
                 rowMotion.stopTracking(restingSectionId: focusedSectionId)
                 if !isTopMenuFocused {
-                    // A watchdog completion means the destination never
-                    // reported real focus. Restore ownership to the last
-                    // accepted row so a failed claim cannot poison the next
-                    // Up/Down command or a later detail-return repair.
+                    // Revalidate every completion against the last accepted
+                    // row. Normal completions return immediately; a watchdog
+                    // completion restores a destination that never reported
+                    // real focus so it cannot poison the next command.
                     restoreConfirmedPresentation()
                 }
                 beginNextQueuedVerticalMove()
@@ -213,7 +218,11 @@ struct TVSkylineSectionFeed: View {
                 // Visual overflow is the key Plex behavior: native focus and
                 // layout stay in the lower band while complete rows cross the
                 // hero area and leave through the physical screen boundary.
-                .scrollClipDisabled()
+                // Animated paging deliberately draws through the lower-band
+                // viewport. Reduced Motion has no overflow transform, so keep
+                // the native clip and swap the page without leaving the old
+                // row painted over the hero.
+                .scrollClipDisabled(!reduceMotion)
                 // Hold the independent backdrop swap until the physical strip
                 // settles, then retire the one outgoing foreground snapshot.
                 .onScrollPhaseChange { _, phase in
@@ -513,7 +522,9 @@ struct TVSkylineSectionFeed: View {
         }
 
         adjacentLogoWarmupTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(80))
+            try? await Task.sleep(
+                for: .milliseconds(Self.adjacentLogoWarmupDelayMilliseconds)
+            )
             guard !Task.isCancelled,
                   focusedSectionId == section.id,
                   marqueeModel.content?.contentId == item.contentId else { return }
@@ -676,6 +687,7 @@ private struct TVSkylineTrackedMarquees: View {
     let focusedSectionId: String?
     let outgoing: TVSkylineOutgoingMarquee?
     let isTransitioning: Bool
+    let reduceMotion: Bool
     let presentationBoundary: CGFloat
 
     var body: some View {
@@ -715,7 +727,7 @@ private struct TVSkylineTrackedMarquees: View {
                     .offset(
                         y: topOverflowOffset(
                             sectionId: outgoing.sectionId,
-                            topOverflowTravel: bandTop
+                            topOverflowTravel: reduceMotion ? 0 : bandTop
                         )
                     )
                 }
@@ -747,7 +759,7 @@ private struct TVSkylineTrackedMarquees: View {
                     .offset(
                         y: topOverflowOffset(
                             sectionId: focusedSectionId,
-                            topOverflowTravel: bandTop
+                            topOverflowTravel: reduceMotion ? 0 : bandTop
                         )
                     )
                 }
@@ -807,7 +819,7 @@ private struct TVSkylineRowFocusRequest: Equatable {
 @Observable
 @MainActor
 private final class TVSkylineRowNavigationModel {
-    static let animationDuration = 0.60
+    static let animationDuration = ContinuumTheme.Skyline.rowBandScrollDuration
     static let animation = Animation.timingCurve(
         0.16,
         1.0,
@@ -815,6 +827,16 @@ private final class TVSkylineRowNavigationModel {
         1.0,
         duration: animationDuration
     )
+
+    private static let focusEventHoldMilliseconds = 180
+    private static let animationSettlePaddingMilliseconds = 70
+    private static let watchdogPaddingMilliseconds = 200
+    private static var animationSettleDelayMilliseconds: Int {
+        Int(animationDuration * 1_000) + animationSettlePaddingMilliseconds
+    }
+    private static var watchdogDelayMilliseconds: Int {
+        Int(animationDuration * 2_000) + watchdogPaddingMilliseconds
+    }
 
     private(set) var request: TVSkylineRowFocusRequest?
     private(set) var isInFlight = false
@@ -915,7 +937,7 @@ private final class TVSkylineRowNavigationModel {
                     // timer and idle becomes the completion boundary instead.
                     scheduleSettledFinish(
                         generation: generation,
-                        delay: .milliseconds(180)
+                        delay: .milliseconds(Self.focusEventHoldMilliseconds)
                     )
                 }
             } else {
@@ -943,7 +965,7 @@ private final class TVSkylineRowNavigationModel {
             // that handed focus from the top menu into this first row.
             scheduleSettledFinish(
                 generation: nextGeneration,
-                delay: .milliseconds(180)
+                delay: .milliseconds(Self.focusEventHoldMilliseconds)
             )
         } else if sawScrollMovement && !isScrollMoving {
             scheduleSettledFinish(
@@ -953,10 +975,11 @@ private final class TVSkylineRowNavigationModel {
         } else if !isScrollMoving {
             // A disabled outer ScrollView may omit a phase callback for its
             // programmatic animation. Keep the transaction alive beyond the
-            // 600 ms curve so the marquee retains live row geometry throughout.
+            // configured curve so the marquee retains live row geometry
+            // throughout, with one small render-settle buffer.
             scheduleSettledFinish(
                 generation: nextGeneration,
-                delay: .milliseconds(670)
+                delay: .milliseconds(Self.animationSettleDelayMilliseconds)
             )
         }
         return true
@@ -1078,7 +1101,9 @@ private final class TVSkylineRowNavigationModel {
 
     private func armWatchdog(for generation: Int) {
         watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(1400))
+            try? await Task.sleep(
+                for: .milliseconds(Self.watchdogDelayMilliseconds)
+            )
             guard !Task.isCancelled else { return }
             self?.finish(generation: generation)
         }

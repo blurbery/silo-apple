@@ -305,7 +305,7 @@ struct ContinuumTheme {
         /// space in standard scroll layouts.
         static let rowBandCardVerticalPadding: CGFloat = 14
         /// Duration for the vertical row-stack scroll when paging up/down.
-        static let rowBandScrollDuration: Double = 0.18
+        static let rowBandScrollDuration: Double = 0.60
         /// Distance the outgoing focused row travels as it fades behind the
         /// marquee/title area during row paging.
         static let rowBandExitOffset: CGFloat = 140

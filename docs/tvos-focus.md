@@ -39,6 +39,11 @@ actionable item can be a real focus target.
 - Keep the focused subtree mounted and structurally stable while moving focus.
 - Attach `onMoveCommand` only at intentional boundaries, such as "Up from the
   first card returns to the top menu." Do not intercept normal in-zone movement.
+- The sanctioned pager exceptions are `TVSkylineSectionFeed` and the Series
+  episode pager. They intercept only Up/Down at a horizontal row boundary to
+  move a scroll-disabled vertical container to one named adjacent row; native
+  focus still owns Left/Right within the row. Keep the page and focus claim in
+  one coordinator rather than adding another directional owner.
 - Move focus geometry with layout (`padding`, `frame`, alignment), not
   `.offset`, because tvOS resolves focus from layout frames.
 
