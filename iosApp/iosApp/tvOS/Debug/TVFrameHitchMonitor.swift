@@ -63,7 +63,7 @@ final class TVFrameHitchMonitor {
 
     func markSkylineAnimationScheduled(inputToken: Int, targetIndex: Int) {
         guard inputToken > 0,
-              let inputTime = skylineInputTimes.removeValue(forKey: inputToken) else { return }
+              let inputTime = skylineInputTimes[inputToken] else { return }
         let scheduled = CACurrentMediaTime()
         pendingSkylineFirstFrame = SkylineFirstFrameMarker(
             token: inputToken,
@@ -76,6 +76,70 @@ final class TVFrameHitchMonitor {
             inputToken,
             (scheduled - inputTime) * 1000,
             targetIndex
+        ))
+    }
+
+    func markSkylineAnimationLogicallyComplete(inputToken: Int, targetIndex: Int) {
+        guard inputToken > 0, let inputTime = skylineInputTimes[inputToken] else { return }
+        emit(String(
+            format: "skyline input #%d logical landing after %.2f ms for row %d",
+            inputToken,
+            (CACurrentMediaTime() - inputTime) * 1000,
+            targetIndex
+        ))
+    }
+
+    func markSkylineAnimationRemoved(inputToken: Int, targetIndex: Int) {
+        guard inputToken > 0, let inputTime = skylineInputTimes[inputToken] else { return }
+        emit(String(
+            format: "skyline input #%d physical tail removed after %.2f ms for row %d",
+            inputToken,
+            (CACurrentMediaTime() - inputTime) * 1000,
+            targetIndex
+        ))
+    }
+
+    func markSkylineFocusRequested(
+        inputToken: Int,
+        rowIndex: Int,
+        itemIndex: Int,
+        itemCount: Int
+    ) {
+        guard inputToken > 0, let inputTime = skylineInputTimes[inputToken] else { return }
+        emit(String(
+            format: "skyline input #%d focus requested after %.2f ms for row %d item %d/%d",
+            inputToken,
+            (CACurrentMediaTime() - inputTime) * 1000,
+            rowIndex,
+            itemIndex,
+            itemCount
+        ))
+    }
+
+    func markSkylineFocusAccepted(
+        inputToken: Int,
+        rowIndex: Int,
+        requestedItemIndex: Int,
+        acceptedItemIndex: Int
+    ) {
+        guard inputToken > 0, let inputTime = skylineInputTimes[inputToken] else { return }
+        emit(String(
+            format: "skyline input #%d focus accepted after %.2f ms for row %d requested %d accepted %d",
+            inputToken,
+            (CACurrentMediaTime() - inputTime) * 1000,
+            rowIndex,
+            requestedItemIndex,
+            acceptedItemIndex
+        ))
+    }
+
+    func finishSkylineVerticalInput(_ token: Int, outcome: String) {
+        guard token > 0, let inputTime = skylineInputTimes.removeValue(forKey: token) else { return }
+        emit(String(
+            format: "skyline input #%d finished after %.2f ms (%@)",
+            token,
+            (CACurrentMediaTime() - inputTime) * 1000,
+            outcome
         ))
     }
 

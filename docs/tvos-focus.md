@@ -210,9 +210,10 @@ against the active source, destination and queued endpoint:
 - With no pending command, a command selecting the other mounted endpoint
   retargets the active presentation immediately. This includes returning to
   the source and retargeting the destination again while a reversal is active.
-- When an animation reaches its destination, rebase and start the next prepared
-  queued move from the `.removed` completion on the same main-actor turn. Do
-  not insert focus, backdrop, logo, or arbitrary settle padding between moves.
+- When an animation reaches its logical destination, retarget the same
+  presentation value for the next prepared queued move on that main-actor
+  turn. Do not rebase between queued moves, and do not insert focus, backdrop,
+  logo, or arbitrary settle padding between them.
 - Widen the mounted window only far enough to retain the real focus owner and
   prepare the bounded queued destinations. Claim destination focus once when
   the queue drains.
@@ -231,20 +232,26 @@ During a flight:
 - Attach a monotonically increasing generation to each target. Start the
   rebase only from the latest generation's animation completion; stale
   completion handlers must do nothing.
-- Use `completionCriteria: .removed`, not `.logicallyComplete`. Rebasing while
-  a spring tail is still moving creates a visible final hop.
-- After the latest flight is fully removed, perform the non-animated rebase,
-  expose only the prepared destination card, and issue one focus request after
-  the queue drains. Retire source ownership only after the destination reports
-  real focus, then expose the rest of that row. Do not let tvOS briefly choose
-  card zero and do not perform mid-flight focus repairs.
+- Register both completion criteria on the same animation transaction. At
+  `.logicallyComplete`, either retarget the next prepared queued move or expose
+  and claim the exact prepared destination card when the queue has drained.
+  Stage that target while the destination is still disabled so tvOS never sees
+  an eligible first-visible-card fallback. Retire source ownership only after
+  the destination reports real focus, then expose the rest of that row on the
+  same state change.
+- Use `.removed` only for the non-animated geometric rebase and pending-height
+  table swap. Rebasing at `.logicallyComplete` while a spring tail is still
+  moving creates a visible final hop; delaying the focus claim until `.removed`
+  makes a nominal 0.40-second spring feel more than a second late on hardware.
+  Do not perform mid-flight focus repairs.
 
-The normal path has one post-rebase focus request. Give its matching generation
-a bounded confirmation window. If the prepared target remains valid but the
-request is rejected, perform a bounded post-flight retry; if confirmation still
-fails, invalidate the generation and rebase without animation to the still-
-focused source. This is focus-failure recovery, not a motion or scroll-settle
-watchdog, and it must never run during a flight.
+The normal path has one logical-landing focus request. Give its matching
+generation a bounded confirmation window. If the prepared target remains valid
+but the request is rejected, perform a bounded retry; if confirmation still
+fails, mark the handoff failed and wait for `.removed` before rebasing without
+animation to the still-focused source. This is focus-failure recovery, not a
+motion or scroll-settle watchdog, and it must never alter geometry during a
+flight.
 
 When a reversal finishes back at its source, invalidate the abandoned
 destination generation and rebase to the source without issuing a focus

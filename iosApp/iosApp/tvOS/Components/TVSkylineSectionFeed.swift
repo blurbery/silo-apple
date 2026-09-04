@@ -82,7 +82,7 @@ struct TVSkylineSectionFeed: View {
                             restrictsFocusToRequestedItem: restrictsFocusToRequestedItem(section.id),
                             prefersDefaultFocus: isSettled && index == 0,
                             focusRequest: focusRequestSectionId == section.id ? rowFocusRequestToken : 0,
-                            focusRequestItemId: focusRequestSectionId == section.id ? focusRequestItemId : nil,
+                            focusRequestItemId: stagedFocusItemId(for: section.id),
                             detailReturnFocusRequest: detailReturnFocusRequest,
                             railPreparation: railPreparations[section.id],
                             focusRestorationOwner: restorationBinding(for: section.id),
@@ -137,7 +137,16 @@ struct TVSkylineSectionFeed: View {
             focusConfirmationTask?.cancel()
             focusConfirmationTask = nil
             animationGeneration += 1
+            if let flight {
+                TVFrameHitchMonitor.shared.cancelSkylineVerticalInput(flight.inputLatencyToken)
+            }
+            if let preparingCommand { cancelLatencyToken(preparingCommand) }
+            cancelQueuedVerticalCommands()
             flight = nil
+            preparingDestinationId = nil
+            preparingCommand = nil
+            focusRequestSectionId = nil
+            focusRequestItemId = nil
             marqueeModel.suspend()
         }
         .onChange(of: focusRequest) { _, request in requestEntryFocus(request) }
@@ -179,6 +188,10 @@ struct TVSkylineSectionFeed: View {
         var projected = flight?.visualTargetIndex
             ?? preparingCommand.map { confirmedIndex + $0.direction }
             ?? center
+        if sections.indices.contains(projected) {
+            lower = min(lower, projected)
+            upper = max(upper, projected)
+        }
         for command in pendingVerticalCommands {
             projected += command.direction
             guard sections.indices.contains(projected) else { break }
@@ -386,6 +399,9 @@ struct TVSkylineSectionFeed: View {
             generation: generation,
             pageExtents: extents,
             isAwaitingFocus: false,
+            hasAcceptedFocus: false,
+            hasBeenRemoved: reduceMotion,
+            focusClaimFailed: false,
             reduceMotion: reduceMotion,
             inputLatencyToken: command.latencyToken,
             focusOwnerId: focusRestorationOwnerSectionId ?? source.id
@@ -393,7 +409,7 @@ struct TVSkylineSectionFeed: View {
 
         if reduceMotion {
             cancelLatencyToken(command)
-            finishFlightAtDestination(generation: generation)
+            beginDestinationFocusHandoff(generation: generation)
         } else {
             animatePresentation(
                 to: destinationIndex,
@@ -424,6 +440,10 @@ struct TVSkylineSectionFeed: View {
             focusRequestSectionId = nil
             focusRequestItemId = nil
             focusRestorationOwnerSectionId = currentFlight.sourceId
+            TVFrameHitchMonitor.shared.finishSkylineVerticalInput(
+                currentFlight.inputLatencyToken,
+                outcome: "retargeted"
+            )
             animationGeneration += 1
             currentFlight.generation = animationGeneration
             currentFlight.visualTargetIndex = otherEndpoint
@@ -486,29 +506,123 @@ struct TVSkylineSectionFeed: View {
             inputToken: inputLatencyToken,
             targetIndex: index
         )
-        withAnimation(
-            .spring(duration: ContinuumTheme.Skyline.rowBandScrollDuration, bounce: 0),
-            completionCriteria: .removed
-        ) {
-            presentedRowIndex = CGFloat(index)
-        } completion: {
+        var transaction = Transaction(
+            animation: .spring(duration: ContinuumTheme.Skyline.rowBandScrollDuration, bounce: 0)
+        )
+        transaction.addAnimationCompletion(criteria: .logicallyComplete) {
+            animationBecameLogicallyComplete(generation: generation, targetIndex: index)
+        }
+        transaction.addAnimationCompletion(criteria: .removed) {
             animationWasRemoved(generation: generation, targetIndex: index)
+        }
+        withTransaction(transaction) {
+            presentedRowIndex = CGFloat(index)
         }
     }
 
-    private func animationWasRemoved(generation: Int, targetIndex: Int) {
+    /// The named 0.40-second spring is visually at rest here, even though
+    /// SwiftUI retains its sub-pixel physical tail for considerably longer.
+    /// Focus and a prepared queued retarget may proceed, but geometry must not
+    /// rebase until `.removed` confirms that tail is truly gone.
+    private func animationBecameLogicallyComplete(generation: Int, targetIndex: Int) {
         guard let currentFlight = flight,
               currentFlight.generation == generation,
               currentFlight.visualTargetIndex == targetIndex else { return }
-        if targetIndex == currentFlight.sourceIndex {
+
+        TVFrameHitchMonitor.shared.markSkylineAnimationLogicallyComplete(
+            inputToken: currentFlight.inputLatencyToken,
+            targetIndex: targetIndex
+        )
+
+        if advanceToNextPreparedQueuedDestination(
+            from: targetIndex,
+            generation: generation
+        ) {
+            return
+        }
+
+        guard targetIndex != currentFlight.sourceIndex else { return }
+        beginDestinationFocusHandoff(generation: generation)
+    }
+
+    /// Retarget the same animated value without rebasing. SwiftUI blends from
+    /// the active presentation value, so rapid deliberate clicks chain at the
+    /// visible landing rather than waiting for the spring's retained tail.
+    private func advanceToNextPreparedQueuedDestination(
+        from targetIndex: Int,
+        generation: Int
+    ) -> Bool {
+        guard var currentFlight = flight,
+              currentFlight.generation == generation,
+              let pending = pendingVerticalCommands.first else { return false }
+        let nextIndex = targetIndex + pending.direction
+        guard sections.indices.contains(nextIndex),
+              destinationIsReady(nextIndex),
+              let target = targetItem(for: sections[nextIndex]) else { return false }
+
+        _ = takeNextQueuedCommand()
+        TVFrameHitchMonitor.shared.finishSkylineVerticalInput(
+            currentFlight.inputLatencyToken,
+            outcome: "queued landing"
+        )
+        animationGeneration += 1
+        let nextGeneration = animationGeneration
+        let destination = sections[nextIndex]
+        currentFlight.destinationId = destination.id
+        currentFlight.destinationIndex = nextIndex
+        currentFlight.visualTargetIndex = nextIndex
+        currentFlight.direction = pending.direction
+        currentFlight.generation = nextGeneration
+        currentFlight.isAwaitingFocus = false
+        currentFlight.hasAcceptedFocus = false
+        currentFlight.hasBeenRemoved = false
+        currentFlight.focusClaimFailed = false
+        currentFlight.inputLatencyToken = pending.latencyToken
+
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            flight = currentFlight
+            focusRequestSectionId = nil
+            focusRequestItemId = nil
+            focusRestorationOwnerSectionId = currentFlight.focusOwnerId
+            rowContent[destination.id] = marqueeContent(for: target, in: destination)
+        }
+        animatePresentation(
+            to: nextIndex,
+            generation: nextGeneration,
+            inputLatencyToken: pending.latencyToken
+        )
+        return true
+    }
+
+    private func animationWasRemoved(generation: Int, targetIndex: Int) {
+        guard var currentFlight = flight,
+              currentFlight.generation == generation,
+              currentFlight.visualTargetIndex == targetIndex else { return }
+        currentFlight.hasBeenRemoved = true
+        flight = currentFlight
+        TVFrameHitchMonitor.shared.markSkylineAnimationRemoved(
+            inputToken: currentFlight.inputLatencyToken,
+            targetIndex: targetIndex
+        )
+        if currentFlight.focusClaimFailed {
+            rollbackFocusHandoff(generation: generation)
+        } else if targetIndex == currentFlight.sourceIndex {
             finishReversalAtSource(generation: generation)
-        } else {
-            finishFlightAtDestination(generation: generation)
+        } else if currentFlight.hasAcceptedFocus {
+            finishAcceptedFlightAtDestination(generation: generation)
+        } else if !currentFlight.isAwaitingFocus {
+            beginDestinationFocusHandoff(generation: generation)
         }
     }
 
     private func finishReversalAtSource(generation: Int) {
         guard let currentFlight = flight, currentFlight.generation == generation else { return }
+        TVFrameHitchMonitor.shared.finishSkylineVerticalInput(
+            currentFlight.inputLatencyToken,
+            outcome: "source restored"
+        )
         let pending = takeNextQueuedCommand()
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
@@ -527,7 +641,7 @@ struct TVSkylineSectionFeed: View {
         }
     }
 
-    private func finishFlightAtDestination(generation: Int) {
+    private func beginDestinationFocusHandoff(generation: Int) {
         guard var currentFlight = flight,
               currentFlight.generation == generation,
               currentFlight.visualTargetIndex == currentFlight.destinationIndex,
@@ -539,38 +653,67 @@ struct TVSkylineSectionFeed: View {
             return
         }
 
-        // A queued move continues from the completed endpoint on this same
-        // main-actor turn. Keep the original focused card mounted and eligible
-        // across the bounded chain; claim focus only when the queue drains.
-        if let pending = takeNextQueuedCommand() {
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                applyPendingMeasurements()
-                confirmedSectionId = destination.id
-                presentedRowIndex = CGFloat(currentFlight.destinationIndex)
-                flight = nil
-                focusRequestSectionId = nil
-                focusRequestItemId = nil
-            }
-            rowContent[destination.id] = marqueeContent(for: target, in: destination)
-            handleVerticalCommand(pending)
-            return
-        }
-
         currentFlight.isAwaitingFocus = true
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
-            applyPendingMeasurements()
-            presentedRowIndex = CGFloat(currentFlight.destinationIndex)
             flight = currentFlight
             focusRestorationOwnerSectionId = destination.id
             focusRequestSectionId = destination.id
             focusRequestItemId = target.contentId
             rowFocusRequestToken += 1
         }
+        TVFrameHitchMonitor.shared.markSkylineFocusRequested(
+            inputToken: currentFlight.inputLatencyToken,
+            rowIndex: currentFlight.destinationIndex,
+            itemIndex: destination.items.firstIndex(where: { $0.contentId == target.contentId }) ?? 0,
+            itemCount: destination.items.count
+        )
         startFocusConfirmationWindow(generation: generation)
+    }
+
+    private func finishAcceptedFlightAtDestination(generation: Int) {
+        guard let currentFlight = flight,
+              currentFlight.generation == generation,
+              currentFlight.hasAcceptedFocus,
+              currentFlight.hasBeenRemoved,
+              sections.indices.contains(currentFlight.destinationIndex) else { return }
+
+        let destination = sections[currentFlight.destinationIndex]
+        let focusedItem = rowContent[destination.id].flatMap { content in
+            destination.items.first(where: { $0.contentId == content.contentId })
+        } ?? targetItem(for: destination)
+        TVFrameHitchMonitor.shared.finishSkylineVerticalInput(
+            currentFlight.inputLatencyToken,
+            outcome: "destination settled"
+        )
+        let pending = takeNextQueuedCommand()
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            applyPendingMeasurements()
+            confirmedSectionId = destination.id
+            presentedRowIndex = CGFloat(currentFlight.destinationIndex)
+            flight = nil
+            focusRequestSectionId = nil
+            focusRequestItemId = nil
+            focusRestorationOwnerSectionId = destination.id
+        }
+        if pending == nil, let focusedItem {
+            let candidate = marqueeContent(for: focusedItem, in: destination)
+            rowContent[destination.id] = candidate
+            preview(
+                candidate,
+                item: focusedItem,
+                section: destination,
+                settlesImmediately: currentFlight.reduceMotion
+            )
+        }
+        if let pending {
+            handleVerticalCommand(pending)
+        } else {
+            scheduleAdjacentRailPreparation()
+        }
     }
 
     private func startFocusConfirmationWindow(generation: Int) {
@@ -584,10 +727,18 @@ struct TVSkylineSectionFeed: View {
             rowFocusRequestToken += 1
             try? await Task.sleep(for: .milliseconds(260))
             guard !Task.isCancelled,
-                  let retryFlight = flight,
+                  var retryFlight = flight,
                   retryFlight.generation == generation,
                   retryFlight.isAwaitingFocus else { return }
-            rollbackFocusHandoff(generation: generation)
+            if retryFlight.hasBeenRemoved {
+                rollbackFocusHandoff(generation: generation)
+            } else {
+                // Never snap a failed handoff back while the physical spring
+                // tail still owns the presentation. The `.removed` callback
+                // performs the same rollback once rebasing is pixel-safe.
+                retryFlight.focusClaimFailed = true
+                flight = retryFlight
+            }
         }
     }
 
@@ -596,6 +747,7 @@ struct TVSkylineSectionFeed: View {
         focusConfirmationTask?.cancel()
         focusConfirmationTask = nil
         animationGeneration += 1
+        TVFrameHitchMonitor.shared.cancelSkylineVerticalInput(currentFlight.inputLatencyToken)
         cancelQueuedVerticalCommands()
         let focusOwnerIndex = sections.firstIndex(where: { $0.id == currentFlight.focusOwnerId })
             ?? currentFlight.sourceIndex
@@ -627,6 +779,18 @@ struct TVSkylineSectionFeed: View {
             return
         }
 
+        if let currentFlight = flight,
+           currentFlight.hasAcceptedFocus,
+           section.id == currentFlight.destinationId {
+            // The card can move horizontally while the invisible spring tail
+            // is retained. This is genuine Left/Right input, so unlike the
+            // initial clamped vertical claim it may update the sticky column.
+            if let index = section.items.firstIndex(where: { $0.contentId == item.contentId }) {
+                stickyColumn = index
+            }
+            return
+        }
+
         guard flight == nil,
               section.id == confirmedSectionId,
               preparingDestinationId == nil else { return }
@@ -645,24 +809,29 @@ struct TVSkylineSectionFeed: View {
     ) {
         focusConfirmationTask?.cancel()
         focusConfirmationTask = nil
-        let pending = takeNextQueuedCommand()
+        var acceptedFlight = currentFlight
+        acceptedFlight.isAwaitingFocus = false
+        acceptedFlight.hasAcceptedFocus = true
+        acceptedFlight.focusClaimFailed = false
         var transaction = Transaction(animation: nil)
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             confirmedSectionId = section.id
-            presentedRowIndex = CGFloat(currentFlight.destinationIndex)
-            flight = nil
+            flight = acceptedFlight
             focusRequestSectionId = nil
             focusRequestItemId = nil
             focusRestorationOwnerSectionId = section.id
         }
         let candidate = marqueeContent(for: item, in: section)
         rowContent[section.id] = candidate
-        preview(candidate, item: item, section: section, settlesImmediately: currentFlight.reduceMotion)
-        if let pending {
-            handleVerticalCommand(pending)
-        } else {
-            scheduleAdjacentRailPreparation()
+        TVFrameHitchMonitor.shared.markSkylineFocusAccepted(
+            inputToken: currentFlight.inputLatencyToken,
+            rowIndex: currentFlight.destinationIndex,
+            requestedItemIndex: min(stickyColumn, max(section.items.count - 1, 0)),
+            acceptedItemIndex: section.items.firstIndex(where: { $0.contentId == item.contentId }) ?? -1
+        )
+        if acceptedFlight.hasBeenRemoved {
+            finishAcceptedFlightAtDestination(generation: acceptedFlight.generation)
         }
     }
 
@@ -682,14 +851,24 @@ struct TVSkylineSectionFeed: View {
     private func isFocusEnabled(_ sectionId: String) -> Bool {
         if let flight {
             if sectionId == flight.focusOwnerId { return true }
-            return flight.isAwaitingFocus && sectionId == flight.destinationId
+            return (flight.isAwaitingFocus || flight.hasAcceptedFocus)
+                && sectionId == flight.destinationId
         }
         return sectionId == focusRestorationOwnerSectionId
     }
 
     private func restrictsFocusToRequestedItem(_ sectionId: String) -> Bool {
         guard let flight else { return false }
-        return flight.isAwaitingFocus && flight.destinationId == sectionId
+        // Keep the exact prepared target structurally staged before the row
+        // becomes eligible. That prevents a one-frame window in which tvOS
+        // can choose the first visible card. Full eligibility returns in the
+        // same state change that accepts the requested focus claim.
+        return flight.destinationId == sectionId && !flight.hasAcceptedFocus
+    }
+
+    private func stagedFocusItemId(for sectionId: String) -> String? {
+        if focusRequestSectionId == sectionId { return focusRequestItemId }
+        return railPreparations[sectionId]?.itemId
     }
 
     private func isLivePresentation(_ sectionId: String) -> Bool {
@@ -883,6 +1062,9 @@ struct TVSkylineSectionFeed: View {
         let sourceWasRemoved = oldConfirmedId != nil && oldConfirmedId != newSection.id
 
         animationGeneration += 1
+        if let flight {
+            TVFrameHitchMonitor.shared.cancelSkylineVerticalInput(flight.inputLatencyToken)
+        }
         focusConfirmationTask?.cancel()
         focusConfirmationTask = nil
         horizontalRestTask?.cancel()
@@ -934,8 +1116,18 @@ struct TVSkylineSectionFeed: View {
         horizontalRestTask?.cancel()
         horizontalRestTask = nil
         animationGeneration += 1
-        let sourceIndex = flight?.sourceIndex ?? confirmedIndex
-        let sourceId = flight?.sourceId ?? confirmedSectionId
+        if let flight {
+            TVFrameHitchMonitor.shared.cancelSkylineVerticalInput(flight.inputLatencyToken)
+        }
+        let sourceIndex: Int
+        let sourceId: String?
+        if let flight, flight.hasAcceptedFocus {
+            sourceIndex = flight.destinationIndex
+            sourceId = flight.destinationId
+        } else {
+            sourceIndex = flight?.sourceIndex ?? confirmedIndex
+            sourceId = flight?.sourceId ?? confirmedSectionId
+        }
         if let preparingCommand { cancelLatencyToken(preparingCommand) }
         cancelQueuedVerticalCommands()
         var transaction = Transaction(animation: nil)
@@ -1171,13 +1363,16 @@ private struct TVSkylineBackdrop: View {
 private struct TVSkylineFlight {
     let sourceId: String
     let sourceIndex: Int
-    let destinationId: String
-    let destinationIndex: Int
+    var destinationId: String
+    var destinationIndex: Int
     var visualTargetIndex: Int
-    let direction: Int
+    var direction: Int
     var generation: Int
     let pageExtents: [String: CGFloat]
     var isAwaitingFocus: Bool
+    var hasAcceptedFocus: Bool
+    var hasBeenRemoved: Bool
+    var focusClaimFailed: Bool
     let reduceMotion: Bool
     var inputLatencyToken: Int
     let focusOwnerId: String
