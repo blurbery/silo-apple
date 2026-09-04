@@ -53,14 +53,16 @@ struct TVSkylineSectionFeed: View {
     /// the marquee preview, this is cleared when focus moves into chrome.
     @State private var focusRestorationOwnerSectionId: String?
     /// Last row that reported real card focus. Horizontal movement stays an
-    /// immediate marquee update; a different row starts the coordinated
-    /// vertical presentation without taking ownership away from native focus.
+    /// immediate marquee update; vertical movement selects which measured row
+    /// the live marquee follows without taking ownership from native focus.
     @State private var focusedSectionId: String?
-    /// Monotonic identity for interruptible row transitions. The renderer
-    /// keeps only the latest incoming/outgoing pair, so rapid presses never
-    /// accumulate presentation layers or delayed work.
-    @State private var rowTransitionGeneration = 0
-    @State private var rowTransition: TVSkylineRowTransition?
+    /// The prior row's immutable foreground while a vertical scroll is in
+    /// flight. It remains attached to that row's measured position, so rapid
+    /// presses replace one snapshot rather than queueing animation layers.
+    @State private var outgoingMarquee: TVSkylineOutgoingMarquee?
+    /// Geometry updates are isolated from the feed so following a row at the
+    /// display refresh rate does not rebuild its card and focus subgraphs.
+    @State private var rowMotion = TVSkylineRowMotionModel()
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -68,22 +70,25 @@ struct TVSkylineSectionFeed: View {
         ZStack(alignment: .top) {
             TVSkylineBackdrop(model: marqueeModel)
 
-            // Native scrolling lives in the bottom row band. Its layout and
-            // focus viewport stay there, while render-only overflow lets a
-            // departing row travel through the hero area like Plex.
+            // Each foreground is positioned from its own row's live geometry.
+            // It sits below the poster plane so an entering title can never
+            // paint through a row that is naturally crossing in front of it.
+            TVSkylineTrackedMarquees(
+                model: marqueeModel,
+                motion: rowMotion,
+                scale: marqueeScale,
+                focusedSectionId: focusedSectionId,
+                outgoing: outgoingMarquee
+            )
+
+            // Native scrolling and focus stay in the bottom band. Rendering
+            // overflows through the full screen above the tracked marquees.
             scrollingRows
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(edges: .bottom)
-
-            // Floats over the band above the row; never focusable or hit-testable.
-            TVSkylineMarquee(
-                model: marqueeModel,
-                scale: marqueeScale,
-                rowTransition: rowTransition
-            )
-            .offset(y: ContinuumTheme.Skyline.landingContentVerticalOffset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .coordinateSpace(name: TVSkylineRowMotionCoordinateSpace.name)
         .onAppear {
             marqueeModel.resume()
             seedMarqueeFromFirstItem()
@@ -138,11 +143,24 @@ struct TVSkylineSectionFeed: View {
                         ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
                             featuredRow(section, isFirstRow: index == 0)
                                 .fixedSize(horizontal: false, vertical: true)
-                                // Native scrolling supplies the movement. A
-                                // whole-row opacity treatment softens the top
-                                // viewport edge without transforming card
-                                // geometry or splitting artwork from chrome.
-                                .modifier(TVSkylineRowScrollPresentation())
+                                // The native stride brings the adjacent row to
+                                // its anchor. A top-only render extension lets
+                                // the departing complete row continue beyond
+                                // the physical screen instead of fading out.
+                                .modifier(
+                                    TVSkylineRowScrollPresentation(
+                                        topOverflowTravel: reduceMotion ? 0 : bandTop
+                                    )
+                                )
+                                // Report the final presented position after
+                                // that extension; the matching marquee follows
+                                // this value instead of running its own clock.
+                                .modifier(
+                                    TVSkylineRowPositionReporter(
+                                        sectionId: section.id,
+                                        motion: rowMotion
+                                    )
+                                )
                                 .id(section.id)
                         }
                     }
@@ -152,16 +170,17 @@ struct TVSkylineSectionFeed: View {
                     .padding(.bottom, trailingPreviewPadding)
                 }
                 .scrollTargetBehavior(.viewAligned)
-                // Visual overflow is the key Plex behavior: the native focus
-                // viewport and scroll geometry remain in the lower band, but
-                // the outgoing complete row can travel and fade through the
-                // hero area rather than being cut off at the band's top edge.
+                // Visual overflow is the key Plex behavior: native focus and
+                // layout stay in the lower band while complete rows cross the
+                // hero area and leave through the physical screen boundary.
                 .scrollClipDisabled()
-                // Row changes animate the band; the marquee holds its backdrop
-                // swap until the scroll settles so the two never composite in
-                // the same frames.
+                // Hold the independent backdrop swap until the physical strip
+                // settles, then retire the one outgoing foreground snapshot.
                 .onScrollPhaseChange { _, phase in
                     marqueeModel.setBackdropDeferred(phase != .idle)
+                    if phase == .idle {
+                        outgoingMarquee = nil
+                    }
                 }
                 // Animated ride home; the first card's focus claim is
                 // re-asserted by MediaRow until the scroll settles, so the
@@ -262,44 +281,40 @@ struct TVSkylineSectionFeed: View {
             rowTitle: section.title,
             isContinueWatching: section.isContinueWatchingSection
         )
-        let transition = makeRowTransition(
+        let outgoing = makeOutgoingMarquee(
             to: section.id,
             outgoingContent: marqueeModel.content,
             outgoingEnrichment: marqueeModel.enrichment
         )
 
+        if let outgoing {
+            outgoingMarquee = outgoing
+        }
         focusedSectionId = section.id
         marqueeModel.preview(
             candidate,
             neighborBackdropURLs: neighborBackdropURLs(around: item, in: section)
         )
-        if let transition {
-            rowTransitionGeneration &+= 1
-            rowTransition = TVSkylineRowTransition(
-                generation: rowTransitionGeneration,
-                direction: transition.direction,
-                outgoing: transition.outgoing
-            )
-        }
     }
 
-    /// Builds a presentation request only for a genuine row boundary. The
-    /// focus engine has already selected the destination card, and the live
-    /// scroll view continues to own all layout, hit testing, and movement.
-    private func makeRowTransition(
+    /// Retains the prior row's foreground only for a genuine row boundary.
+    /// Both the snapshot and the live destination foreground are positioned
+    /// from row geometry, so there is no independently timed transition to
+    /// flash, drift, or finish ahead of the poster strip.
+    private func makeOutgoingMarquee(
         to destinationSectionId: String,
         outgoingContent: TVMarqueeContent?,
         outgoingEnrichment: TVMarqueeEnrichment?
-    ) -> (direction: TVSkylineRowTransition.Direction, outgoing: TVSkylineMarqueeSnapshot)? {
+    ) -> TVSkylineOutgoingMarquee? {
         guard let sourceSectionId = focusedSectionId,
               sourceSectionId != destinationSectionId,
-              let sourceIndex = sections.firstIndex(where: { $0.id == sourceSectionId }),
-              let destinationIndex = sections.firstIndex(where: { $0.id == destinationSectionId }),
+              sections.contains(where: { $0.id == sourceSectionId }),
+              sections.contains(where: { $0.id == destinationSectionId }),
               let outgoingContent else { return nil }
 
-        return (
-            destinationIndex > sourceIndex ? .down : .up,
-            TVSkylineMarqueeSnapshot(
+        return TVSkylineOutgoingMarquee(
+            sectionId: sourceSectionId,
+            snapshot: TVSkylineMarqueeSnapshot(
                 content: outgoingContent,
                 enrichment: outgoingEnrichment
             )
@@ -334,6 +349,7 @@ struct TVSkylineSectionFeed: View {
         guard marqueeModel.content == nil,
               let section = sections.first,
               let item = section.items.first else { return }
+        focusedSectionId = section.id
         marqueeModel.seed(
             TVMarqueeContent(
                 item: item,
@@ -374,107 +390,67 @@ private struct TVSkylineBackdrop: View {
     }
 }
 
-private struct TVSkylineMarquee: View {
+/// Foregrounds do not animate themselves. Each one follows the final rendered
+/// Y position of the poster row it belongs to, producing the same continuous
+/// hero → row → hero → row strip seen in the reference video. Keeping this in
+/// a sibling below `scrollingRows` also guarantees posters occlude text when
+/// the two pages cross instead of the text cutting through artwork.
+private struct TVSkylineTrackedMarquees: View {
     let model: TVFocusMarqueeModel
+    let motion: TVSkylineRowMotionModel
     let scale: TVFocusMarquee.Scale
-    let rowTransition: TVSkylineRowTransition?
-
-    @State private var outgoing: TVSkylineMarqueeSnapshot?
-    @State private var outgoingOffset: CGFloat = 0
-    @State private var outgoingOpacity = 0.0
-    @State private var incomingOffset: CGFloat = 0
-    @State private var incomingOpacity = 1.0
-    @State private var activeGeneration = 0
-    @State private var transitionTask: Task<Void, Never>?
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let focusedSectionId: String?
+    let outgoing: TVSkylineOutgoingMarquee?
 
     var body: some View {
-        ZStack {
-            if let outgoing {
-                TVFocusMarquee(
-                    content: outgoing.content,
-                    enrichment: outgoing.enrichment,
-                    scale: scale,
-                    isLivePresentation: false
+        GeometryReader { proxy in
+            let bandHeight = proxy.size.height * ContinuumTheme.Skyline.rowBandHeightFraction
+            let bandTop = min(
+                proxy.size.height,
+                max(
+                    0,
+                    proxy.size.height - bandHeight
+                        + ContinuumTheme.Skyline.landingContentVerticalOffset
                 )
-                .offset(y: outgoingOffset)
-                .opacity(outgoingOpacity)
-            }
-
-            TVFocusMarquee(
-                content: model.content,
-                enrichment: model.enrichment,
-                scale: scale
             )
-            .offset(y: incomingOffset)
-            .opacity(incomingOpacity)
+
+            ZStack {
+                if let outgoing,
+                   outgoing.sectionId != focusedSectionId,
+                   let rowMinY = motion.rowMinYBySectionId[outgoing.sectionId] {
+                    TVFocusMarquee(
+                        content: outgoing.snapshot.content,
+                        enrichment: outgoing.snapshot.enrichment,
+                        scale: scale,
+                        isLivePresentation: false
+                    )
+                    .offset(y: marqueeOffset(rowMinY: rowMinY, bandTop: bandTop))
+                }
+
+                if let focusedSectionId {
+                    TVFocusMarquee(
+                        content: model.content,
+                        enrichment: model.enrichment,
+                        scale: scale
+                    )
+                    .offset(
+                        y: marqueeOffset(
+                            rowMinY: motion.rowMinYBySectionId[focusedSectionId] ?? bandTop,
+                            bandTop: bandTop
+                        )
+                    )
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
-        .onChange(of: rowTransition?.generation) { _, _ in
-            guard let rowTransition else { return }
-            begin(rowTransition)
-        }
-        .onDisappear {
-            transitionTask?.cancel()
-            transitionTask = nil
-        }
+        .allowsHitTesting(false)
     }
 
-    /// At most two foreground frames exist. A new row change cancels the
-    /// cleanup for the prior one, replaces its snapshot, and retargets the
-    /// same presentation properties instead of queuing another animation.
-    private func begin(_ transition: TVSkylineRowTransition) {
-        transitionTask?.cancel()
-        activeGeneration = transition.generation
-
-        var setup = Transaction()
-        setup.disablesAnimations = true
-        withTransaction(setup) {
-            outgoing = transition.outgoing
-            outgoingOffset = 0
-            outgoingOpacity = reduceMotion ? 0 : 1
-            incomingOffset = reduceMotion ? 0 : transition.direction.incomingOffset
-            incomingOpacity = reduceMotion ? 1 : TVSkylineRowTransition.incomingStartOpacity
-        }
-
-        guard !reduceMotion else {
-            outgoing = nil
-            return
-        }
-
-        let generation = transition.generation
-        transitionTask = Task { @MainActor in
-            // Commit the starting frame before driving both layers toward
-            // their destinations. Yielding never delays content selection or
-            // focus; it only establishes the transition's visual origin.
-            await Task.yield()
-            guard !Task.isCancelled, activeGeneration == generation else { return }
-
-            withAnimation(TVSkylineRowTransition.animation) {
-                outgoingOffset = transition.direction.outgoingOffset
-                outgoingOpacity = 0
-                incomingOffset = 0
-                incomingOpacity = 1
-            }
-
-            do {
-                try await Task.sleep(for: .seconds(TVSkylineRowTransition.duration))
-            } catch {
-                return
-            }
-            guard !Task.isCancelled, activeGeneration == generation else { return }
-
-            var cleanup = Transaction()
-            cleanup.disablesAnimations = true
-            withTransaction(cleanup) {
-                outgoing = nil
-                outgoingOffset = 0
-                outgoingOpacity = 0
-                incomingOffset = 0
-                incomingOpacity = 1
-            }
-            transitionTask = nil
-        }
+    /// `TVFocusMarquee` rests 56 points below its original 50/50 anchor. Add
+    /// the row's displacement from that same anchor and its content block's
+    /// bottom stays welded to the row header on every presented frame.
+    private func marqueeOffset(rowMinY: CGFloat, bandTop: CGFloat) -> CGFloat {
+        ContinuumTheme.Skyline.landingContentVerticalOffset + rowMinY - bandTop
     }
 }
 
@@ -486,67 +462,61 @@ private struct TVSkylineMarqueeSnapshot: Equatable {
     let enrichment: TVMarqueeEnrichment?
 }
 
-private struct TVSkylineRowTransition: Equatable {
-    enum Direction: Equatable {
-        case up
-        case down
-
-        var incomingOffset: CGFloat {
-            switch self {
-            case .up: -TVSkylineRowTransition.topExitTravel
-            case .down: TVSkylineRowTransition.rowTravel
-            }
-        }
-
-        var outgoingOffset: CGFloat {
-            switch self {
-            case .up: TVSkylineRowTransition.rowTravel
-            case .down: -TVSkylineRowTransition.topExitTravel
-            }
-        }
-    }
-
-    static let duration = 0.36
-    /// Approximately one Skyline row stride on the 1080-point tvOS canvas.
-    /// The lower row already sits one stride below the active row, so its
-    /// foreground starts at the same distance and rises alongside it.
-    static let rowTravel: CGFloat = 420
-    /// A row above the active slot receives an additional render-only lift so
-    /// its posters reach the physical top edge instead of stopping midway
-    /// through the hero. Its matching foreground uses the same total travel.
-    static let topExitTravel = rowTravel + ContinuumTheme.Skyline.rowBandExitOffset
-    static let incomingStartOpacity = 0.18
-    static let animation = Animation.timingCurve(
-        0.16, 1.0,
-        0.30, 1.0,
-        duration: duration
-    )
-
-    let generation: Int
-    let direction: Direction
-    let outgoing: TVSkylineMarqueeSnapshot
+private struct TVSkylineOutgoingMarquee: Equatable {
+    let sectionId: String
+    let snapshot: TVSkylineMarqueeSnapshot
 }
 
-/// Extends the native row stride only on the top side. The next row remains
-/// exactly where the existing lower-edge preview placed it; when scrolling
-/// down it rises one native stride with its incoming marquee. The departing
-/// row gets an extra visual lift through the hero so its posters reach the
-/// screen's top, and the reverse transition follows the same path downward.
-/// Layout, hit testing, and focus frames remain native throughout.
+private enum TVSkylineRowMotionCoordinateSpace {
+    static let name = "TVSkylineRowMotion"
+}
+
+/// Only the lightweight foreground observer reads this state. Card rows write
+/// their presented Y positions without becoming observation dependants, so a
+/// 60 fps scroll does not re-evaluate artwork or focusable button hierarchies.
+@Observable
+@MainActor
+private final class TVSkylineRowMotionModel {
+    private(set) var rowMinYBySectionId: [String: CGFloat] = [:]
+
+    func update(sectionId: String, minY: CGFloat) {
+        guard minY.isFinite else { return }
+        if let previous = rowMinYBySectionId[sectionId],
+           abs(previous - minY) < 0.25 {
+            return
+        }
+        rowMinYBySectionId[sectionId] = minY
+    }
+}
+
+private struct TVSkylineRowPositionReporter: ViewModifier {
+    let sectionId: String
+    let motion: TVSkylineRowMotionModel
+
+    func body(content: Content) -> some View {
+        content.onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.frame(in: .named(TVSkylineRowMotionCoordinateSpace.name)).minY
+        } action: { minY in
+            motion.update(sectionId: sectionId, minY: minY)
+        }
+    }
+}
+
+/// The adjacent row still travels by the native layout stride into its anchor.
+/// Once a row crosses the top side, extend that same interactive phase by the
+/// hero-band height: its header, posters, captions, and attached foreground
+/// then continue together until the entire page clears the physical screen.
+/// There is deliberately no opacity curve—the screen edge alone removes it.
 private struct TVSkylineRowScrollPresentation: ViewModifier {
+    let topOverflowTravel: CGFloat
+
     func body(content: Content) -> some View {
         content.scrollTransition(.interactive, axis: .vertical) { row, phase in
-            row
-                .offset(
-                    y: phase.value < 0
-                        ? CGFloat(phase.value) * ContinuumTheme.Skyline.rowBandExitOffset
-                        : 0
-                )
-                .opacity(
-                    phase.value < 0
-                        ? max(0, 1 - phase.value * phase.value)
-                        : max(0.72, 1 - 0.28 * phase.value)
-                )
+            row.offset(
+                y: phase.value < 0
+                    ? CGFloat(phase.value) * topOverflowTravel
+                    : 0
+            )
         }
     }
 }
