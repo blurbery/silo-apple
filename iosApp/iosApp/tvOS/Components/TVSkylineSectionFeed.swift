@@ -133,12 +133,6 @@ struct TVSkylineSectionFeed: View {
                     .padding(.bottom, trailingPreviewPadding)
                 }
                 .scrollTargetBehavior(.viewAligned)
-                // Row changes animate the band; the marquee holds its backdrop
-                // swap until the scroll settles so the two never composite in
-                // the same frames.
-                .onScrollPhaseChange { _, phase in
-                    marqueeModel.setBackdropDeferred(phase != .idle)
-                }
                 // Animated ride home; the first card's focus claim is
                 // re-asserted by MediaRow until the scroll settles, so the
                 // animation can't lose the claim to mid-flight focus repairs.
@@ -240,30 +234,8 @@ struct TVSkylineSectionFeed: View {
                 rowId: section.id,
                 rowTitle: section.title,
                 isContinueWatching: section.isContinueWatchingSection
-            ),
-            neighborBackdropURLs: neighborBackdropURLs(around: item, in: section)
+            )
         )
-    }
-
-    /// Section-level backdrops of the cards on either side of `item` in its
-    /// row. Only direct backdrops qualify: episodes and items without one
-    /// resolve their hero art from detail enrichment, which is a metadata
-    /// request the marquee already rate-limits and must not be duplicated
-    /// here for cards the user may never rest on.
-    private func neighborBackdropURLs(
-        around item: SectionItem,
-        in section: ResolvedSection
-    ) -> [String] {
-        guard let index = section.items.firstIndex(where: { $0.id == item.id }) else { return [] }
-        let radius = ContinuumTheme.Skyline.marqueeNeighborBackdropPrefetchRadius
-        let window = section.items.indices.clamped(to: (index - radius)..<(index + radius + 1))
-        return window.compactMap { neighborIndex -> String? in
-            guard neighborIndex != index else { return nil }
-            let neighbor = section.items[neighborIndex]
-            guard neighbor.type.lowercased() != "episode",
-                  let url = neighbor.backdropUrl, !url.isEmpty else { return nil }
-            return url
-        }
     }
 
     /// Seed the first card as soon as sections exist, so cold entry does not
