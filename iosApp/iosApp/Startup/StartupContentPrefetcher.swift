@@ -627,6 +627,28 @@ enum StartupContentPrefetcher {
         }
     }
 
+    #if os(tvOS)
+    /// Join the launch requests before revealing Home. Completed responses
+    /// are already in the cache used by HomeViewModel and TVMainTabView's
+    /// initializers; an empty library is a completed response too.
+    static func prepareTVHomeForLaunch() async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { @MainActor in
+                guard ResponseCache.shared.get(
+                    CacheKey.homeSections, as: SectionsResponse.self
+                ) == nil else { return }
+                _ = try? await fetchHomeSections()
+            }
+            group.addTask { @MainActor in
+                guard ResponseCache.shared.get(
+                    CacheKey.userLibraries, as: LibrariesResponse.self
+                ) == nil else { return }
+                _ = try? await fetchUserLibraries()
+            }
+        }
+    }
+    #endif
+
     static func prefetchAuthenticatedContent() {
         prefetchHomeSections()
         prefetchRecommendations()

@@ -1,6 +1,5 @@
 #if os(tvOS)
 import SwiftUI
-import UIKit
 
 private enum EpisodeHomeHoverMetrics {
     static let scale: CGFloat = 1.08
@@ -17,8 +16,8 @@ private enum EpisodeHomeHoverMetrics {
 ///
 /// Pass `currentContentId` to highlight the episode currently represented
 /// by the surrounding detail experience. Legacy rails center that card on
-/// first appearance. Series can instead pin focused cards to the leading
-/// carousel slot until the content reaches its trailing scroll boundary.
+/// first appearance. Series uses Home's native thumbnail controls inside
+/// the season pager.
 struct TVEpisodeRail: View {
     let episodes: [EpisodeListItem]
     let onSelect: (String) -> Void
@@ -53,13 +52,7 @@ struct TVEpisodeRail: View {
     var focusRequest = 0
 
     @FocusState private var focusedCardId: String?
-    @Namespace private var anchoredFocusScope
-    @State private var anchoredIndex = 0
-    @State private var anchoredScrollPosition = ScrollPosition(x: 0)
-    @State private var anchoredPlayedOverrides: [String: Bool] = [:]
-    @State private var anchoredFavoriteOverrides: [String: Bool] = [:]
     @State private var uiCustomization = UICustomizationPreferences.shared
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @ViewBuilder
     var body: some View {
@@ -79,10 +72,13 @@ struct TVEpisodeRail: View {
             items: homeStyleItems,
             onItemTap: onSelect,
             showsHeader: false,
+            usesLazyCardLayout: false,
             onItemPlay: homeStylePlayAction,
             showProgress: true,
             layout: .thumbnail,
             usesProvidedThumbnailTapAction: true,
+            usesEpisodeCaption: true,
+            defersOffscreenArtwork: true,
             prefersDefaultFocusOnFirstItem: true,
             focusRequest: focusRequest,
             defaultFocusItemId: currentContentId,
@@ -145,7 +141,7 @@ struct TVEpisodeRail: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(alignment: .top, spacing: cardSpacing) {
-                    ForEach(Array(episodes.enumerated()), id: \.element.contentId) { index, episode in
+                    ForEach(episodes) { episode in
                         TVEpisodeCard(
                             episode: episode,
                             isCurrent: currentContentId == episode.contentId,
@@ -162,22 +158,10 @@ struct TVEpisodeRail: View {
                         )
                         .id(episode.contentId)
                         .focused($focusedCardId, equals: episode.contentId)
-                        .onMoveCommand { direction in
-                            guard isOutwardBoundaryMove(direction, at: index) else { return }
-                            holdLegacyBoundary(
-                                at: index,
-                                contentId: episode.contentId,
-                                proxy: proxy
-                            )
-                        }
                     }
                 }
                 .scrollTargetLayout()
                 .padding(.vertical, 12)
-                .background {
-                    TVEpisodeRailBounceDisabler()
-                        .allowsHitTesting(false)
-                }
             }
             .applyEpisodeScrollTargetBehavior(anchorsFocusedCard)
             .focusSection()
@@ -205,374 +189,11 @@ struct TVEpisodeRail: View {
         }
     }
 
-    /// Episode buttons participate in native focus, including the system's
-    /// navigation sounds. Focus changes update the proven leading carousel
-    /// position while horizontal input never writes a second focus destination.
-    private var anchoredRail: some View {
-        GeometryReader { geometry in
-            anchoredCards(viewportWidth: geometry.size.width)
-                .onAppear {
-                    seedAnchoredIndex(viewportWidth: geometry.size.width)
-                }
-                .onChange(of: episodeIdentityKey) { _, _ in
-                    seedAnchoredIndex(viewportWidth: geometry.size.width)
-                }
-                .onChange(of: currentContentId) { _, _ in
-                    guard focusedCardId == nil else { return }
-                    seedAnchoredIndex(viewportWidth: geometry.size.width)
-                }
-                .onChange(of: focusRequest) { _, request in
-                    guard request > 0 else { return }
-                    seedAnchoredIndex(viewportWidth: geometry.size.width)
-                    focusedCardId = anchoredEpisode?.contentId
-                }
-                .onChange(of: focusedCardId) { _, contentId in
-                    if let contentId,
-                       let index = episodes.firstIndex(where: { $0.contentId == contentId }) {
-                        anchorFocusedSelection(at: index, viewportWidth: geometry.size.width)
-                    }
-                    onFocusedEpisodeChange?(contentId)
-                }
-        }
-        .frame(height: anchoredRailHeight)
-        .focusScope(anchoredFocusScope)
-        .focusSection()
-        .applyCurrentEpisodeDefaultFocus(
-            anchoredEpisode?.contentId,
-            binding: $focusedCardId
-        )
-        .onDisappear {
-            onFocusedEpisodeChange?(nil)
-        }
-    }
-
-    private func anchoredCards(viewportWidth: CGFloat) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(alignment: .top, spacing: cardSpacing) {
-                ForEach(Array(episodes.enumerated()), id: \.element.contentId) { index, episode in
-                    anchoredEpisodeButton(
-                        episode,
-                        index: index,
-                        viewportWidth: viewportWidth
-                    )
-                        .zIndex(focusedCardId == episode.contentId ? 1 : 0)
-                }
-            }
-            .padding(
-                .leading,
-                EpisodeHomeHoverMetrics.leadingInset(for: anchoredCardWidth)
-            )
-            .padding(.vertical, 12)
-            .background {
-                TVEpisodeRailBounceDisabler()
-                    .allowsHitTesting(false)
-            }
-        }
-        .scrollPosition($anchoredScrollPosition)
-        // The outer season pager is scroll-disabled. Enable only this inner
-        // rail so native focus can reveal offscreen episodes.
-        .environment(\.isScrollEnabled, true)
-        .frame(
-            width: viewportWidth,
-            height: anchoredRailHeight,
-            alignment: .topLeading
-        )
-        .clipped()
-        .onScrollGeometryChange(for: CGFloat.self) { geometry in
-            geometry.contentOffset.x
-        } action: { _, liveOffset in
-            clampAnchoredScrollOffset(
-                liveOffset,
-                viewportWidth: viewportWidth
-            )
-        }
-    }
-
-    @ViewBuilder
-    private func anchoredEpisodeButton(
-        _ episode: EpisodeListItem,
-        index: Int,
-        viewportWidth: CGFloat
-    ) -> some View {
-        let button = Button {
-            onSelect(episode.contentId)
-        } label: {
-            EpisodeCardLabel(
-                episode: episode,
-                isPlayed: anchoredIsPlayed(episode),
-                isCurrent: currentContentId == episode.contentId,
-                cardWidth: anchoredCardWidth,
-                stillHeight: anchoredStillHeight,
-                stillCornerRadius: 18,
-                captionStyle: uiCustomization.cardPresentation.caption,
-                focusOverride: focusedCardId == episode.contentId,
-                hidesEpisodeTitle: true,
-                usesHomeHoverEffect: true,
-                showsFocusOutline: false,
-                showsCurrentOutline: false
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(TVAnchoredEpisodeButtonStyle())
-        .focused($focusedCardId, equals: episode.contentId)
-        .onMoveCommand { direction in
-            // Only the vertical boundaries hand off to another focus region.
-            // Left and Right belong entirely to the native episode buttons.
-            switch direction {
-            case .up: onMoveUp?()
-            case .down: onMoveDown?()
-            case .left, .right:
-                guard isOutwardBoundaryMove(direction, at: index) else { return }
-                holdAnchoredBoundary(at: index, viewportWidth: viewportWidth)
-            default: break
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(episodeRailAccessibilityLabel(
-            seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber,
-            title: episode.title,
-            metadata: anchoredMetadataLine(for: episode),
-            isCurrent: currentContentId == episode.contentId,
-            isPlayed: anchoredIsPlayed(episode)
-        ))
-        .accessibilityValue("Episode \(index + 1) of \(max(episodes.count, 1))")
-
-        if onPlay != nil || onSetWatched != nil || onSetFavorite != nil {
-            button.contextMenu { anchoredContextActions }
-        } else {
-            button
-        }
-    }
-
-    private var anchoredCardWidth: CGFloat {
-        baseCardWidth * uiCustomization.cardPresentation.posterSize.scale
-    }
-
-    private var anchoredStillHeight: CGFloat {
-        anchoredCardWidth * cardHeightRatio
-    }
-
     private var anchoredRailHeight: CGFloat {
-        anchoredStillHeight
+        let width = baseCardWidth * uiCustomization.cardPresentation.posterSize.scale
+        return width * cardHeightRatio
             + (uiCustomization.cardPresentation.caption.showsTitle ? 46 : 0)
             + 24
-    }
-
-    private var anchoredEpisode: EpisodeListItem? {
-        guard episodes.indices.contains(anchoredIndex) else { return episodes.first }
-        return episodes[anchoredIndex]
-    }
-
-    private var episodeIdentityKey: String {
-        episodes.map(\.contentId).joined(separator: "|")
-    }
-
-    private func anchoredContentOffset(
-        for index: Int,
-        viewportWidth: CGFloat
-    ) -> CGFloat {
-        guard !episodes.isEmpty else { return 0 }
-        let step = anchoredCardWidth + cardSpacing
-        let contentWidth = CGFloat(episodes.count) * anchoredCardWidth
-            + CGFloat(max(episodes.count - 1, 0)) * cardSpacing
-        let maximumOffset = anchoredMaximumContentOffset(
-            viewportWidth: viewportWidth,
-            contentWidth: contentWidth
-        )
-        return min(CGFloat(index) * step, maximumOffset)
-    }
-
-    private func anchoredMaximumContentOffset(
-        viewportWidth: CGFloat,
-        contentWidth: CGFloat? = nil
-    ) -> CGFloat {
-        let leadingInset = EpisodeHomeHoverMetrics.leadingInset(for: anchoredCardWidth)
-        let resolvedContentWidth = contentWidth ?? (
-            CGFloat(episodes.count) * anchoredCardWidth
-                + CGFloat(max(episodes.count - 1, 0)) * cardSpacing
-        )
-        return max(
-            0,
-            leadingInset + resolvedContentWidth - viewportWidth
-        )
-    }
-
-    private func isOutwardBoundaryMove(
-        _ direction: MoveCommandDirection,
-        at index: Int
-    ) -> Bool {
-        guard !episodes.isEmpty else { return false }
-        return (direction == .left && index == episodes.startIndex)
-            || (direction == .right && index == episodes.index(before: episodes.endIndex))
-    }
-
-    private func holdLegacyBoundary(
-        at index: Int,
-        contentId: String,
-        proxy: ScrollViewProxy
-    ) {
-        guard episodes.indices.contains(index) else { return }
-        var transaction = Transaction(animation: nil)
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            focusedCardId = contentId
-            proxy.scrollTo(
-                contentId,
-                anchor: index == episodes.startIndex ? .leading : .trailing
-            )
-        }
-    }
-
-    private func holdAnchoredBoundary(at index: Int, viewportWidth: CGFloat) {
-        guard episodes.indices.contains(index) else { return }
-        let contentId = episodes[index].contentId
-        var transaction = Transaction(animation: nil)
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            anchoredIndex = index
-            focusedCardId = contentId
-            anchoredScrollPosition.scrollTo(
-                x: anchoredContentOffset(for: index, viewportWidth: viewportWidth)
-            )
-        }
-    }
-
-    private func clampAnchoredScrollOffset(
-        _ liveOffset: CGFloat,
-        viewportWidth: CGFloat
-    ) {
-        let maximumOffset = anchoredMaximumContentOffset(viewportWidth: viewportWidth)
-        let clampedOffset = min(max(liveOffset, 0), maximumOffset)
-        guard abs(liveOffset - clampedOffset) > 0.5 else { return }
-
-        var transaction = Transaction(animation: nil)
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            anchoredScrollPosition.scrollTo(x: clampedOffset)
-        }
-    }
-
-    private func seedAnchoredIndex(viewportWidth: CGFloat) {
-        let seededIndex: Int
-        if let currentContentId,
-           let index = episodes.firstIndex(where: { $0.contentId == currentContentId }) {
-            seededIndex = index
-        } else {
-            seededIndex = min(anchoredIndex, max(episodes.count - 1, 0))
-        }
-
-        // A newly inserted season page inherits the outer pan transaction.
-        // Seed its internal episode offset without animating in the opposite
-        // direction; user-driven episode moves retain their smooth transition.
-        var transaction = Transaction(animation: nil)
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            anchoredIndex = seededIndex
-            anchoredScrollPosition.scrollTo(
-                x: anchoredContentOffset(
-                    for: seededIndex,
-                    viewportWidth: viewportWidth
-                )
-            )
-        }
-    }
-
-    private func anchorFocusedSelection(
-        at index: Int,
-        viewportWidth: CGFloat
-    ) {
-        guard episodes.indices.contains(index) else { return }
-
-        // Keep selection state out of the scroll animation transaction so the
-        // hero and cards do not inherit the carousel's motion.
-        anchoredIndex = index
-        let targetOffset = anchoredContentOffset(
-            for: index,
-            viewportWidth: viewportWidth
-        )
-        if reduceMotion {
-            anchoredScrollPosition.scrollTo(x: targetOffset)
-        } else {
-            withAnimation(.smooth(duration: 0.30, extraBounce: 0)) {
-                anchoredScrollPosition.scrollTo(x: targetOffset)
-            }
-        }
-    }
-
-    private func anchoredIsPlayed(_ episode: EpisodeListItem) -> Bool {
-        anchoredPlayedOverrides[episode.contentId]
-            ?? episode.userData?.played
-            ?? false
-    }
-
-    private func anchoredIsFavorite(_ episode: EpisodeListItem) -> Bool {
-        anchoredFavoriteOverrides[episode.contentId]
-            ?? favoriteStates[episode.contentId]
-            ?? (currentContentId == episode.contentId && currentContentIsFavorite)
-    }
-
-    private func anchoredMetadataLine(for episode: EpisodeListItem) -> String? {
-        var parts: [String] = []
-        if let airDate = DetailDateFormatting.abbreviatedDate(episode.airDate) {
-            parts.append(airDate)
-        }
-        if let runtime = episode.runtime, runtime > 0 {
-            parts.append(runtime >= 60
-                ? "\(runtime / 60)h \(runtime % 60)m"
-                : "\(runtime)m")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: "  ·  ")
-    }
-
-    @ViewBuilder
-    private var anchoredContextActions: some View {
-        if let episode = anchoredEpisode {
-            if let onPlay {
-                Button {
-                    onPlay(episode.contentId)
-                } label: {
-                    Label(
-                        "Play S\(episode.seasonNumber):E\(episode.episodeNumber)",
-                        systemImage: "play.fill"
-                    )
-                }
-            }
-
-            if let onSetWatched {
-                Button {
-                    let played = !anchoredIsPlayed(episode)
-                    anchoredPlayedOverrides[episode.contentId] = played
-                    Task {
-                        if await onSetWatched(episode.contentId, played) == false {
-                            anchoredPlayedOverrides[episode.contentId] = nil
-                        }
-                    }
-                } label: {
-                    Label(
-                        anchoredIsPlayed(episode) ? "Mark as Unwatched" : "Mark as Watched",
-                        systemImage: anchoredIsPlayed(episode) ? "circle" : "checkmark.circle"
-                    )
-                }
-            }
-
-            if let onSetFavorite {
-                Button {
-                    let isFavorite = !anchoredIsFavorite(episode)
-                    anchoredFavoriteOverrides[episode.contentId] = isFavorite
-                    Task {
-                        if await onSetFavorite(episode.contentId, isFavorite) == false {
-                            anchoredFavoriteOverrides[episode.contentId] = nil
-                        }
-                    }
-                } label: {
-                    Label(
-                        anchoredIsFavorite(episode) ? "Remove from Favorites" : "Add to Favorites",
-                        systemImage: anchoredIsFavorite(episode) ? "heart.slash" : "heart"
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -621,73 +242,6 @@ private extension SectionItem {
             isFavorite: isFavorite
         )
         overlaySummary = nil
-    }
-}
-
-/// The Siri Remote's touch surface can rubber-band a horizontal ScrollView
-/// beyond its content even when the focus engine correctly stays on the end
-/// card. Disable only that presentation bounce. Unlike the previous boundary
-/// latch, this never disables scrolling or changes the focus graph, so an
-/// inward move remains available immediately.
-private struct TVEpisodeRailBounceDisabler: UIViewRepresentable {
-    func makeUIView(context: Context) -> ProbeView {
-        ProbeView()
-    }
-
-    func updateUIView(_ uiView: ProbeView, context: Context) {
-        uiView.configureEnclosingScrollView()
-        DispatchQueue.main.async { [weak uiView] in
-            uiView?.configureEnclosingScrollView()
-        }
-    }
-
-    final class ProbeView: UIView {
-        override init(frame: CGRect) {
-            super.init(frame: frame)
-            isUserInteractionEnabled = false
-            isAccessibilityElement = false
-            backgroundColor = .clear
-        }
-
-        required init?(coder: NSCoder) {
-            fatalError("init(coder:) has not been implemented")
-        }
-
-        override func didMoveToSuperview() {
-            super.didMoveToSuperview()
-            configureEnclosingScrollView()
-        }
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            configureEnclosingScrollView()
-        }
-
-        func configureEnclosingScrollView() {
-            var ancestor = superview
-            while let view = ancestor {
-                if let scrollView = view as? UIScrollView {
-                    scrollView.bounces = false
-                    scrollView.alwaysBounceHorizontal = false
-                    return
-                }
-                ancestor = view.superview
-            }
-        }
-    }
-}
-
-/// The native button owns focus and sound, while the artwork supplies the
-/// existing Home-style hover without adding a second system lift effect.
-private struct TVAnchoredEpisodeButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .opacity(configuration.isPressed ? 0.96 : 1)
-            .focusEffectDisabled()
-            .animation(
-                .easeOut(duration: ContinuumTheme.fastDuration),
-                value: configuration.isPressed
-            )
     }
 }
 
