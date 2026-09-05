@@ -51,7 +51,10 @@ enum OverlayPresets {
         gap: 4,
         accentStrategy: .background,
         backgroundColor: { accent in
-            if let accent { return accent.mix(with: Color.black.opacity(0.6), amount: 0.72) }
+            if let accent {
+                // Preserve the straight-alpha sRGB recipe on every platform.
+                return accent.mix(with: .black, by: 0.28, in: .device).opacity(0.888)
+            }
             return Color.black.opacity(0.6)
         },
         foregroundColor: { _ in .white },
@@ -94,9 +97,11 @@ enum OverlayPresets {
         gap: 4,
         accentStrategy: .background,
         backgroundColor: { accent in
-            let base = Color(red: 20/255, green: 20/255, blue: 30/255).opacity(0.7)
-            if let accent { return accent.mix(with: base, amount: 0.8) }
-            return base
+            let base = Color(red: 20/255, green: 20/255, blue: 30/255)
+            if let accent {
+                return accent.mix(with: base, by: 0.2, in: .device).opacity(0.94)
+            }
+            return base.opacity(0.7)
         },
         foregroundColor: { _ in .white },
         borderColor: { _ in Color.white.opacity(0.15) },
