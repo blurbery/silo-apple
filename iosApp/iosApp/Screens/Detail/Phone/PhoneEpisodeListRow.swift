@@ -95,31 +95,25 @@ struct PhoneEpisodeListRow: View {
             }
         }
         .frame(width: thumbnailWidth, height: thumbnailHeight)
-        .clipShape(RoundedRectangle(cornerRadius: ContinuumTheme.smallCornerRadius))
+        .clipShape(RoundedRectangle(cornerRadius: SiloTheme.smallCornerRadius))
         .overlay {
-            RoundedRectangle(cornerRadius: ContinuumTheme.smallCornerRadius)
+            RoundedRectangle(cornerRadius: SiloTheme.smallCornerRadius)
                 .stroke(isCurrent ? Color.white.opacity(0.8) : .clear, lineWidth: 2)
         }
     }
 
     private var metadata: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(PhoneEpisodeFormatting.compactNumberLabel(for: episode))
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-
-                if let metadataLine = PhoneEpisodeFormatting.metadataLine(for: episode) {
-                    Text(metadataLine)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
+            if let metadataLine = PhoneEpisodeFormatting.metadataLine(for: episode) {
+                Text(metadataLine)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
             }
 
             Text(PhoneEpisodeFormatting.title(for: episode))
                 .font(.headline)
-                .foregroundStyle(Color.continuumOnSurface)
+                .foregroundStyle(Color.siloOnSurface)
                 .lineLimit(1)
 
             if let overview = episode.overview, !overview.isEmpty {

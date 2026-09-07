@@ -73,7 +73,7 @@ struct WatchlistView: View {
                 )
             }
         }
-        .continuumBackground()
+        .siloPageBackground()
         .modifier(PersonalListNavigationChrome(title: showsNavigationTitle ? "Watchlist" : nil))
         .task {
             await loadWatchlist()
@@ -82,8 +82,6 @@ struct WatchlistView: View {
             await loadWatchlist()
         }
         #if os(tvOS)
-        .onAppear { applyFocusRequest(focusRequest) }
-        .onChange(of: focusRequest) { _, request in applyFocusRequest(request) }
         .onChange(of: items.map(\.contentId)) { _, _ in applyFocusRequest(focusRequest) }
         #endif
     }
@@ -100,7 +98,7 @@ struct WatchlistView: View {
                 if filteredIOSItems.isEmpty {
                     iosSelectedSectionEmptyState
                 } else {
-                    IOSPersonalMediaCarouselRows(items: filteredIOSItems) { item, state in
+                    IOSPersonalMediaPosterLayout(items: filteredIOSItems) { item, state in
                         guard !state.inWatchlist else { return }
                         withAnimation {
                             items.removeAll { $0.contentId == item.contentId }
@@ -108,8 +106,9 @@ struct WatchlistView: View {
                     }
                 }
             }
-            .padding(ContinuumTheme.padding)
+            .padding(SiloTheme.padding)
         }
+        .reportsPageChromeScroll()
         #else
         ScrollView {
             LazyVGrid(columns: columns, spacing: 16) {
@@ -136,8 +135,9 @@ struct WatchlistView: View {
                     .frame(maxWidth: .infinity)
                 }
             }
-            .padding(ContinuumTheme.padding)
+            .padding(SiloTheme.padding)
         }
+        .reportsPageChromeScroll()
         #endif
     }
 
@@ -148,7 +148,7 @@ struct WatchlistView: View {
                 if usesTVTopMenu {
                     Text("Watchlist")
                         .font(.system(size: 64, weight: .bold))
-                        .foregroundStyle(Color.continuumOnSurface)
+                        .foregroundStyle(Color.siloOnSurface)
                 }
 
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 60) {
@@ -169,7 +169,7 @@ struct WatchlistView: View {
                             cardWidthOverride: tvCardWidthOverride,
                             onUserStateChanged: { state in
                                 guard !state.inWatchlist else { return }
-                                withAnimation(.easeInOut(duration: ContinuumTheme.normalDuration)) {
+                                withAnimation(.easeInOut(duration: SiloTheme.normalDuration)) {
                                     items.removeAll { $0.contentId == item.contentId }
                                 }
                             }
@@ -184,17 +184,18 @@ struct WatchlistView: View {
                 }
                 .focusSection()
             }
-            .padding(.horizontal, ContinuumTheme.safePadding)
-            .padding(.top, usesTVTopMenu ? TVTopMenuLayout.contentTopInset : ContinuumTheme.smallPadding)
-            .padding(.bottom, ContinuumTheme.safePadding)
+            .padding(.horizontal, SiloTheme.safePadding)
+            .padding(.top, usesTVTopMenu ? TVTopMenuLayout.contentTopInset : SiloTheme.smallPadding)
+            .padding(.bottom, SiloTheme.safePadding)
         }
+        .modifier(TVMenuEntryScroll(request: focusRequest, isTopMenuFocused: isTopMenuFocused, onReady: applyFocusRequest))
     }
 
     /// Keep the final poster width stable even when the global poster-size
     /// preference is changed—`MediaCard` applies that scale after overrides.
     /// Eight 176-point posters plus 40-point gaps fit the tvOS safe width.
     private var tvCardWidthOverride: CGFloat {
-        ContinuumTheme.Skyline.densePosterCardWidth
+        SiloTheme.Skyline.densePosterCardWidth
             / uiCustomization.cardPresentation.posterSize.scale
     }
 
@@ -247,8 +248,8 @@ struct WatchlistView: View {
         }
         error = nil
         do {
-            let response: CatalogResponse = try await ContinuumAPI.shared.get(
-                "/api/v1/watchlist"
+            let response: CatalogResponse = try await SiloAPI.shared.watchlist(
+                offset: 0, limit: 100
             )
             ResponseCache.shared.set(response, for: CacheKey.watchlist)
             items = response.items

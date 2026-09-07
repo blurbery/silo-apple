@@ -12,12 +12,12 @@ import SwiftUI
 ///
 /// Focus model: one native graph with one preferred owner. Each pane is a
 /// `.focusSection()`; vertical movement stays in-pane and Left/Right bridges
-/// panes natively. The detail pane gives its preferred row user-initiated
-/// default priority so it wins the initial cross-pane focus resolution before
-/// geometric proximity can select a lower row. The outer scope still chooses
-/// the active pane for page entry and modal restoration (see docs/tvos-focus.md).
+/// panes natively. Both panes give their entry target user-initiated default
+/// priority: Right enters the top detail row and Left returns to the selected
+/// category, regardless of the detail row's vertical position. The outer scope
+/// chooses the active pane for entry and modal restoration (see docs/tvos-focus.md).
 struct TVSettingsView: View {
-    @State private var viewModel = TVSettingsViewModel()
+    @State private var viewModel = SettingsViewModel()
     @State private var diagnosticsModel = DiagnosticsViewModel()
     @State private var showSignOutConfirm = false
     @State private var showPrivacyPolicy = false
@@ -26,7 +26,9 @@ struct TVSettingsView: View {
     @State private var activePicker: TVSettingsPickerRequest?
     @State private var pendingPickerFocus: TVSettingsDetailFocus?
     @State private var isRestoringDetailFocus = false
+    @State private var isRestoringRailFocus = false
     @State private var preferredFocusOwner: FocusOwner = .rail
+    @State private var preferredRailFocus: RailItem = .category(.general)
     @State private var preferredDetailFocus: TVSettingsDetailFocus = .top
     @FocusState private var railFocus: RailItem?
     @FocusState private var detailFocus: TVSettingsDetailFocus?
@@ -52,6 +54,7 @@ struct TVSettingsView: View {
                     confirm: router.signOutAndReset,
                     additionalDestructiveAction: router.signOutRemoveServerAndReset
                 )
+                .onDisappear(perform: restoreSignOutFocus)
                 .transition(.opacity)
                 .zIndex(1)
             }
@@ -83,20 +86,22 @@ struct TVSettingsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .animation(.easeOut(duration: ContinuumTheme.fastDuration), value: showSignOutConfirm)
+        .animation(.easeOut(duration: SiloTheme.fastDuration), value: showSignOutConfirm)
         .onAppear(perform: focusGeneralOnEntry)
         .task {
-            await viewModel.load()
+            await viewModel.loadSettings()
             await diagnosticsModel.load(profile: viewModel.activeProfile)
         }
         .onChange(of: railFocus) { _, focus in
-            if focus != nil,
+            if let focus,
                activePicker == nil,
                !showSignOutConfirm,
                !showPrivacyPolicy,
                !showOpenSourceAcknowledgements,
-               !isRestoringDetailFocus {
+               !isRestoringDetailFocus,
+               !isRestoringRailFocus {
                 preferredFocusOwner = .rail
+                preferredRailFocus = focus
             }
 
             // The pane previews whatever category the rail focus rests on.
@@ -104,7 +109,7 @@ struct TVSettingsView: View {
             if case .category(let category) = focus {
                 preferredDetailFocus = initialDetailFocus(for: category)
                 if category != selectedCategory {
-                    withAnimation(.easeOut(duration: ContinuumTheme.normalDuration)) {
+                    withAnimation(.easeOut(duration: SiloTheme.normalDuration)) {
                         selectedCategory = category
                     }
                 }
@@ -116,22 +121,23 @@ struct TVSettingsView: View {
                !showSignOutConfirm,
                !showPrivacyPolicy,
                !showOpenSourceAcknowledgements,
-               !isRestoringDetailFocus {
+               !isRestoringDetailFocus,
+               !isRestoringRailFocus {
                 preferredDetailFocus = focus
                 preferredFocusOwner = .detail
             }
         }
-        .onChange(of: viewModel.editorSubtitleLanguage) { _, _ in
-            Task { await viewModel.saveProfilePrefs() }
+        .onChange(of: viewModel.prefs.subtitleLanguage) { _, _ in
+            Task { await viewModel.prefs.saveSubtitlePrefs() }
         }
-        .onChange(of: viewModel.editorSubtitleMode) { _, _ in
-            Task { await viewModel.saveProfilePrefs() }
+        .onChange(of: viewModel.prefs.subtitleMode) { _, _ in
+            Task { await viewModel.prefs.saveSubtitlePrefs() }
         }
-        .onChange(of: viewModel.editorShowForcedSubtitles) { _, _ in
-            Task { await viewModel.saveProfilePrefs() }
+        .onChange(of: viewModel.prefs.showForcedSubtitles) { _, _ in
+            Task { await viewModel.prefs.saveSubtitlePrefs() }
         }
-        .onChange(of: viewModel.editorPreferredMetadataLanguage) { _, _ in
-            Task { await viewModel.saveMetadataLanguage() }
+        .onChange(of: viewModel.prefs.preferredMetadataLanguage) { _, _ in
+            Task { await viewModel.prefs.saveMetadataLanguage() }
         }
         .onChange(of: diagnosticsModel.shouldShowSettings) { _, isVisible in
             if !isVisible, selectedCategory == .diagnostics {
@@ -147,6 +153,7 @@ struct TVSettingsView: View {
     private func focusGeneralOnEntry() {
         selectedCategory = .general
         preferredFocusOwner = .rail
+        preferredRailFocus = .category(.general)
         preferredDetailFocus = .generalAppleTVUser
         detailFocus = nil
         railFocus = .category(.general)
@@ -169,11 +176,11 @@ struct TVSettingsView: View {
                 .padding(24)
                 .background(
                     RoundedRectangle(cornerRadius: 26)
-                        .fill(Color.continuumSurface.opacity(0.74))
+                        .fill(Color.siloSurface.opacity(0.74))
                 )
                 .overlay {
                     RoundedRectangle(cornerRadius: 26)
-                        .strokeBorder(Color.continuumOutline, lineWidth: 1)
+                        .strokeBorder(Color.siloOutline, lineWidth: 1)
                 }
                 .frame(width: 490)
                 .disabled(
@@ -185,8 +192,8 @@ struct TVSettingsView: View {
                 )
                 .defaultFocus(
                     $railFocus,
-                    .category(selectedCategory),
-                    priority: preferredFocusOwner == .rail ? .userInitiated : .automatic
+                    preferredFocusOwner == .detail ? .category(selectedCategory) : preferredRailFocus,
+                    priority: .userInitiated
                 )
                 .prefersDefaultFocus(preferredFocusOwner == .rail, in: settingsFocusScope)
                 .focusSection()
@@ -200,6 +207,7 @@ struct TVSettingsView: View {
                         || showPrivacyPolicy
                         || showOpenSourceAcknowledgements
                         || activePicker != nil
+                        || isRestoringRailFocus
                 )
                 .defaultFocus(
                     $detailFocus,
@@ -213,7 +221,7 @@ struct TVSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .focusScope(settingsFocusScope)
-        .safeAreaPadding(.horizontal, ContinuumTheme.Skyline.safeAreaX)
+        .safeAreaPadding(.horizontal, SiloTheme.Skyline.safeAreaX)
         .safeAreaPadding(.top, 48)
         .safeAreaPadding(.bottom, 44)
     }
@@ -225,11 +233,11 @@ struct TVSettingsView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Settings")
                     .font(.system(size: 42, weight: .bold))
-                    .foregroundStyle(Color.continuumOnSurface)
+                    .foregroundStyle(Color.siloOnSurface)
 
                 Text("Make Silo work the way you like.")
                     .font(.system(size: 18))
-                    .foregroundStyle(Color.continuumSecondaryText)
+                    .foregroundStyle(Color.siloSecondaryText)
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 20)
@@ -248,7 +256,7 @@ struct TVSettingsView: View {
             Text("Silo \(Self.versionString)")
                 .font(.system(size: 16, weight: .medium, design: .monospaced))
                 .tracking(1)
-                .foregroundColor(.continuumSecondaryText.opacity(0.7))
+                .foregroundColor(.siloSecondaryText.opacity(0.7))
                 .padding(.leading, 20)
                 .padding(.top, 10)
         }
@@ -359,7 +367,7 @@ struct TVSettingsView: View {
             return .generalAppleTVUser
         }
         if category == .subtitles,
-           viewModel.settingsServerUpgradeRequired || viewModel.subtitleMatchesSystemAppearance {
+           viewModel.prefs.serverUpgradeRequired || viewModel.subtitleMatchesSystemAppearance {
             return .subtitleUseDeviceSettings
         }
         return .top
@@ -374,19 +382,30 @@ struct TVSettingsView: View {
             return
         }
         preferredFocusOwner = .rail
+        preferredRailFocus = .category(selectedCategory)
         detailFocus = nil
         railFocus = .category(selectedCategory)
         resetFocus(in: railFocusScope)
     }
 
     private func dismissSignOutConfirmation() {
-        showSignOutConfirm = false
         preferredFocusOwner = .rail
-        railFocus = .signOut
+        preferredRailFocus = .signOut
+        isRestoringRailFocus = true
+        showSignOutConfirm = false
+        railFocus = nil
+    }
+
+    private func restoreSignOutFocus() {
+        guard isRestoringRailFocus else { return }
+        // Restore after the confirmation's focus subtree has left, ignoring
+        // transient rail focus while the dismissal animation completes.
         Task { @MainActor in
             await Task.yield()
             resetFocus(in: railFocusScope)
             railFocus = .signOut
+            try? await Task.sleep(for: .milliseconds(120))
+            isRestoringRailFocus = false
         }
     }
 
@@ -395,13 +414,13 @@ struct TVSettingsView: View {
         preferredDetailFocus = .serverPrivacyPolicy
         railFocus = nil
         detailFocus = nil
-        withAnimation(.easeOut(duration: ContinuumTheme.fastDuration)) {
+        withAnimation(.easeOut(duration: SiloTheme.fastDuration)) {
             showPrivacyPolicy = true
         }
     }
 
     private func dismissPrivacyPolicy() {
-        withAnimation(.easeOut(duration: ContinuumTheme.fastDuration)) {
+        withAnimation(.easeOut(duration: SiloTheme.fastDuration)) {
             showPrivacyPolicy = false
         }
         preferredFocusOwner = .detail
@@ -422,13 +441,13 @@ struct TVSettingsView: View {
         preferredDetailFocus = .serverOpenSourceLicenses
         railFocus = nil
         detailFocus = nil
-        withAnimation(.easeOut(duration: ContinuumTheme.fastDuration)) {
+        withAnimation(.easeOut(duration: SiloTheme.fastDuration)) {
             showOpenSourceAcknowledgements = true
         }
     }
 
     private func dismissOpenSourceAcknowledgements() {
-        withAnimation(.easeOut(duration: ContinuumTheme.fastDuration)) {
+        withAnimation(.easeOut(duration: SiloTheme.fastDuration)) {
             showOpenSourceAcknowledgements = false
         }
         preferredFocusOwner = .detail
@@ -545,11 +564,11 @@ struct TVSettingsView: View {
 
                 Text(selectedCategory.title)
                     .font(.system(size: 38, weight: .semibold))
-                    .foregroundStyle(Color.continuumOnSurface)
+                    .foregroundStyle(Color.siloOnSurface)
 
                 Text(selectedCategory.blurb)
                     .font(.system(size: 20))
-                    .foregroundStyle(Color.continuumSecondaryText)
+                    .foregroundStyle(Color.siloSecondaryText)
             }
         }
         .padding(.horizontal, 24)
@@ -778,7 +797,7 @@ enum TVSettingsCategory: String, CaseIterable, Identifiable {
     var tint: Color {
         switch self {
         case .general, .playback, .subtitles:
-            return .continuumAccent
+            return .siloAccent
         case .diagnostics:
             return .orange
         case .server:

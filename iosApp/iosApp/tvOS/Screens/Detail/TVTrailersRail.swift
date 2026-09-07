@@ -32,6 +32,7 @@ struct TVTrailersRail: View {
     /// Non-zero changes explicitly hand focus into the first trailer when a
     /// Series has no cast rail above it.
     var focusRequest = 0
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var focusedEntryId: String?
 
@@ -71,6 +72,9 @@ struct TVTrailersRail: View {
         // episode rails, instead of the geometrically-nearest one.
         .applyTrailerRailDefaultFocus(entries.first?.id, binding: $focusedEntryId)
         .scrollClipDisabled()
+        .onChange(of: focusedEntryId != nil) { _, focused in
+            onFocusChange?(focused)
+        }
         .onChange(of: focusRequest) { _, request in
             guard request > 0, let firstId = entries.first?.id else { return }
             focusedEntryId = firstId
@@ -141,24 +145,17 @@ private struct TrailerCardLabel: View {
                 if let secondaryLine {
                     Text(secondaryLine)
                         .font(.system(size: 17, weight: .medium))
-                        .foregroundColor(.continuumSecondaryText)
+                        .foregroundColor(.siloSecondaryText)
                         .lineLimit(1)
                 }
             }
-            .animation(.easeOut(duration: ContinuumTheme.fastDuration), value: isFocused)
+            .animation(.easeOut(duration: SiloTheme.fastDuration), value: isFocused)
         }
         .frame(width: cardWidth, alignment: .leading)
     }
 
     private var titleColor: Color {
-        isFocused ? .continuumOnSurface : Color.continuumOnSurface.opacity(0.92)
-    }
-
-    /// `TrailerRailEntry.title` already falls back to this label when the
-    /// server has no name for the entry — in that case the eyebrow alone
-    /// says everything and repeating it below would read as a bug.
-    private var kindLabel: String {
-        ExtraKindLabels.label(for: entry.kind)
+        isFocused ? .siloOnSurface : Color.siloOnSurface.opacity(0.92)
     }
 
     /// Remote cards say where they go — selecting one leaves the app for
@@ -175,7 +172,7 @@ private struct TrailerCardLabel: View {
 
     private var thumbnail: some View {
         ZStack {
-            Color.continuumSurfaceElevated
+            Color.siloSurfaceElevated
                 .frame(width: cardWidth, height: thumbHeight)
 
             artwork
@@ -205,7 +202,7 @@ private struct TrailerCardLabel: View {
         case .local:
             Image(systemName: "film")
                 .font(.system(size: 48))
-                .foregroundColor(.continuumSecondaryText)
+                .foregroundColor(.siloSecondaryText)
                 .frame(width: cardWidth, height: thumbHeight)
         }
     }
@@ -253,16 +250,16 @@ struct TVTrailerStatusPill: View {
         HStack(spacing: 14) {
             if isFetching {
                 ProgressView()
-                    .tint(.continuumOnSurface)
+                    .tint(.siloOnSurface)
             } else {
                 Image(systemName: "info.circle")
                     .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(.continuumOnSurface)
+                    .foregroundColor(.siloOnSurface)
             }
 
             Text(message)
                 .font(.system(size: 24, weight: .semibold))
-                .foregroundColor(.continuumOnSurface)
+                .foregroundColor(.siloOnSurface)
                 .lineLimit(1)
         }
         .padding(.horizontal, 26)
@@ -296,9 +293,8 @@ struct TVTrailerStatusPill: View {
 /// playback path on tvOS, which has no browser to fall back on (iOS falls
 /// back to the public watch page in the default browser).
 ///
-/// Plain (non-isolated) statics, matching `PlatformScreen` and
-/// `TVFocusDebugOverlay`'s `UIApplication` accessors; every call site is a
-/// view-body / `onAppear` closure on the main thread.
+/// Call sites access these statics from view bodies and lifecycle callbacks
+/// on the main thread.
 enum TVTrailerLaunch {
     /// Keep remote trailer rails visible in the simulator so the complete
     /// movie and series detail hierarchy can be exercised and captured.

@@ -104,7 +104,7 @@ enum TemporaryAuthScopeEndResult: Equatable, Sendable {
     case differentGeneration(activeGenerationID: UUID)
 }
 
-/// Persistent, thread-safe store for Continuum session state.
+/// Persistent, thread-safe store for Silo session state.
 ///
 /// Mirrors the surface of the shared Kotlin `TokenManager`, but persists
 /// tokens in the Keychain so login survives app kills. `serverUrl` and
@@ -237,6 +237,7 @@ actor TokenStore {
         if serverId == activeServerId { return }
         persistentCredentialGenerationID = UUID()
         activeServerId = serverId
+        clearApplePushDisplayTokenIfIssued(forServerOtherThan: serverId)
         cachedAccessToken = nil
         cachedRefreshToken = nil
         cachedProfileToken = nil
@@ -253,6 +254,7 @@ actor TokenStore {
         if serverId == activeServerId { return }
         persistentCredentialGenerationID = UUID()
         activeServerId = serverId
+        clearApplePushDisplayTokenIfIssued(forServerOtherThan: serverId)
         cachedAccessToken = nil
         cachedRefreshToken = nil
         cachedProfileToken = nil
@@ -604,55 +606,6 @@ actor TokenStore {
         }
     }
 
-    /// Clear a rejected captured refresh only if it still belongs to the same
-    /// active server account and no newer refresh token has replaced it. This
-    /// is the failure-side counterpart to `saveRefreshedTokens`: a late scoped
-    /// response must never sign out a server selected while it was in flight.
-    func clearTokensAfterRejectedRefresh(
-        replacing previousValue: String?,
-        expected: HTTPRequestIdentity,
-        credentialOwner: CapturedHTTPRequestCredentialOwner
-    ) -> Bool {
-        let expectedURL = ServerRegistry.normalize(url: expected.serverURL)
-        guard credentialOwner == .persistentServer(serverId: expected.serverId),
-              !expected.serverId.isEmpty,
-              !expectedURL.isEmpty,
-              let previousValue,
-              !previousValue.isEmpty else {
-            // Refused before reaching the shared invalidation funnel, so the
-            // funnel's own line will not fire. Grouped under one token: these
-            // are malformed-caller shapes, not races.
-            recordSessionEvent(
-                phase: "sessionInvalidation",
-                outcome: "skipped",
-                reason: "unsupportedCredentialShape"
-            )
-            return false
-        }
-        guard let account = refreshAccountIdentity(),
-              account.serverId == expected.serverId,
-              account.serverURL == expectedURL else {
-            recordSessionEvent(
-                phase: "sessionInvalidation",
-                outcome: "skipped",
-                reason: "accountChanged"
-            )
-            return false
-        }
-        let disposition = invalidateRejectedRefresh(
-            CapturedRefreshCredential(
-                account: RefreshAccountIdentity(
-                    serverId: expected.serverId,
-                    serverURL: expectedURL,
-                    credentialGenerationID: account.credentialGenerationID
-                ),
-                refreshToken: previousValue,
-                owner: credentialOwner
-            )
-        )
-        return disposition == .persistentSessionCleared
-    }
-
     /// Invalidate only the credential snapshot the server rejected. Temporary
     /// playback credentials stay installed until their teardown path removes
     /// them, preventing a fall-through to the owner's persistent account.
@@ -969,6 +922,13 @@ actor TokenStore {
         }
         guard persisted else { return false }
         cachedProfileToken = profileToken
+        // The display token was minted for the previous profile. Drop it
+        // before the new profile id is visible so the extension cannot pair
+        // the new context with the old credential; the next registration
+        // mints a replacement.
+        if defaults.string(forKey: profileIdDefaultsKey) != profileID {
+            clearApplePushDisplayToken()
+        }
         defaults.set(profileID, forKey: profileIdDefaultsKey)
         mirrorActiveTokensForExtension()
         return true
@@ -997,6 +957,7 @@ actor TokenStore {
         }
         defaults.removeObject(forKey: profileIdDefaultsKey)
         cachedProfileToken = nil
+        clearApplePushDisplayToken()
         mirrorActiveTokensForExtension()
         return true
     }
@@ -1110,9 +1071,35 @@ actor TokenStore {
         }
     }
 
+    /// The display token is bound to one session, server, and profile, so it
+    /// dies with any of them; the next registration mints a fresh one.
+    private func clearApplePushDisplayToken() {
+        // Metadata is removed only once the Keychain item is gone, so a
+        // failed delete leaves the token paired with its real expiry and
+        // issuing server rather than looking freshly issued.
+        guard profileKeychain.delete(SharedStorage.applePushDisplayTokenAccount) else { return }
+        defaults.removeObject(forKey: SharedStorage.applePushDisplayTokenExpiresAtKey)
+        defaults.removeObject(forKey: SharedStorage.applePushDisplayTokenServerIdKey)
+    }
+
+    /// Server retargeting happens both on a real switch and when the actor
+    /// hydrates the persisted server on a cold launch (`activeServerId` starts
+    /// empty). Only the former invalidates the display token, so compare
+    /// against the server the token was issued for rather than the actor's
+    /// previous state. A token with no recorded server predates this key and
+    /// is cleared to be safe.
+    private func clearApplePushDisplayTokenIfIssued(forServerOtherThan serverId: String) {
+        guard profileKeychain.get(SharedStorage.applePushDisplayTokenAccount) != nil else { return }
+        let issuedFor = defaults.string(forKey: SharedStorage.applePushDisplayTokenServerIdKey) ?? ""
+        if issuedFor.isEmpty || issuedFor != serverId {
+            clearApplePushDisplayToken()
+        }
+    }
+
     private func clearMirroredTokensForExtension() {
         accountKeychain.delete(SharedStorage.mirroredAccessTokenAccount)
         profileKeychain.delete(SharedStorage.mirroredProfileTokenAccount)
+        clearApplePushDisplayToken()
         lastMirroredAccessToken = nil
         lastMirroredProfileToken = nil
     }

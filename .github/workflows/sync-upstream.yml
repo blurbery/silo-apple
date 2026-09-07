@@ -95,7 +95,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "::warning title=Upstream sync needs conflict resolution::Fork main was left unchanged. See the job summary for the conflicting files."
 
-      - name: Report a blocked sync
+      - name: Fail a blocked sync
         if: steps.merge.outputs.blocked == 'true'
         shell: bash
         env:
@@ -115,6 +115,7 @@ jobs:
               fi
             done
           } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Keep the scheduled workflow active
         if: steps.merge.outputs.changed == 'false' && steps.merge.outputs.blocked != 'true'

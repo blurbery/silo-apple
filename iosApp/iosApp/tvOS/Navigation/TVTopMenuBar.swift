@@ -176,6 +176,11 @@ struct TVTopMenuBar: View {
     /// host opens its panel if needed and hands focus in (§5.3). Takes the
     /// element so the host routes to the right panel.
     let onEnterPanel: (TVTopMenuPanel) -> Void
+    /// D-pad down on a bar element with no panel (Home, Calendar, Search):
+    /// the host hands focus to the page's first (left-most) item instead of
+    /// letting the engine pick whichever card sits geometrically under the
+    /// centered tab.
+    let onEnterContent: () -> Void
     /// Press on the profile avatar opens the profile panel and enters it
     /// immediately; dwell only previews it.
     let onProfilePressed: () -> Void
@@ -204,7 +209,7 @@ struct TVTopMenuBar: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private static let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.continuum.app",
+        subsystem: Bundle.main.bundleIdentifier ?? "org.siloserver.silo",
         category: "TVFocus"
     )
 
@@ -215,24 +220,24 @@ struct TVTopMenuBar: View {
             HStack(spacing: 0) {
                 wordmark
 
-                Spacer(minLength: ContinuumTheme.Skyline.tabSpacing)
+                Spacer(minLength: SiloTheme.Skyline.tabSpacing)
 
                 trailingCluster
             }
         }
-        .frame(height: ContinuumTheme.Skyline.barHeight)
-        .padding(.horizontal, ContinuumTheme.Skyline.safeAreaX)
-        .padding(.top, ContinuumTheme.Skyline.barTopInset)
+        .frame(height: SiloTheme.Skyline.barHeight)
+        .padding(.horizontal, SiloTheme.Skyline.safeAreaX)
+        .padding(.top, SiloTheme.Skyline.barTopInset)
         .frame(maxWidth: .infinity, alignment: .top)
         .ignoresSafeArea(edges: [.top, .horizontal])
         // The bar dims only while focus is down in the content zone (§5.1).
         // An open panel keeps it fully lit — focus has merely descended into
         // the dropdown, and dimming the bar there greys out the panel's own
         // anchor tab and reads as a heavy "everything went dark" state.
-        .opacity(isMenuFocused || openPanel != nil ? 1.0 : ContinuumTheme.Skyline.barDimmedOpacity)
+        .opacity(isMenuFocused || openPanel != nil ? 1.0 : SiloTheme.Skyline.barDimmedOpacity)
         // Reduce Motion snaps the bar dim/restore as focus enters/leaves
         // the content zone (§5.1; §4.2 acceptance: no drift animations).
-        .animation(reduceMotion ? nil : .easeInOut(duration: ContinuumTheme.normalDuration), value: isMenuFocused)
+        .animation(reduceMotion ? nil : .easeInOut(duration: SiloTheme.normalDuration), value: isMenuFocused)
         .focusSection()
         .disabled(isFocusSuppressed || panelEntersFocus)
         // Menu handling must not be conditionally wrapped around the focused
@@ -343,12 +348,11 @@ struct TVTopMenuBar: View {
 
     // MARK: - Clusters
 
+    /// Brand logo (mark + wordmark asset), sized to the bar row so it sits
+    /// on the same centre line as the tab capsules and trailing icons.
     private var wordmark: some View {
-        Text("SILO")
-            .font(.system(size: ContinuumTheme.Skyline.wordmarkSize, weight: .heavy))
-            .tracking(ContinuumTheme.Skyline.wordmarkTracking)
-            .foregroundStyle(.white)
-            .accessibilityLabel("Silo")
+        SiloWordmarkView(width: SiloTheme.Skyline.wordmarkWidth)
+            .frame(height: SiloTheme.Skyline.barHeight)
             .accessibilityHidden(true)
     }
 
@@ -358,14 +362,14 @@ struct TVTopMenuBar: View {
             scrollingTabCluster
         }
         .frame(maxWidth: .infinity, alignment: .center)
-        .frame(height: ContinuumTheme.Skyline.barHeight)
+        .frame(height: SiloTheme.Skyline.barHeight)
     }
 
     /// Keep the ordinary menu as one native focus row. Besides preserving the
     /// Skyline screen-centered composition, this gives Search and Home direct
     /// focus adjacency instead of separating them with a scroll container.
     private var centeredTabCluster: some View {
-        HStack(spacing: ContinuumTheme.Skyline.tabSpacing) {
+        HStack(spacing: SiloTheme.Skyline.tabSpacing) {
             searchButton
 
             ForEach(Array(roots.enumerated()), id: \.element) { index, root in
@@ -375,8 +379,8 @@ struct TVTopMenuBar: View {
             // Balance Search so the roots themselves remain screen-centered.
             Color.clear
                 .frame(
-                    width: ContinuumTheme.Skyline.barIconSize,
-                    height: ContinuumTheme.Skyline.barIconSize
+                    width: SiloTheme.Skyline.barIconSize,
+                    height: SiloTheme.Skyline.barIconSize
                 )
                 .accessibilityHidden(true)
         }
@@ -387,12 +391,12 @@ struct TVTopMenuBar: View {
 
     /// Long customized menus keep Search fixed and scroll only the roots.
     private var scrollingTabCluster: some View {
-        HStack(spacing: ContinuumTheme.Skyline.tabSpacing) {
+        HStack(spacing: SiloTheme.Skyline.tabSpacing) {
             searchButton
 
             ScrollViewReader { proxy in
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: ContinuumTheme.Skyline.tabSpacing) {
+                    HStack(spacing: SiloTheme.Skyline.tabSpacing) {
                         ForEach(Array(roots.enumerated()), id: \.element) { index, root in
                             rootButton(root, index: index, count: roots.count)
                                 .id(TVTopMenuFocus.root(root))
@@ -403,7 +407,7 @@ struct TVTopMenuBar: View {
                 .scrollClipDisabled()
                 .onChange(of: focusedItem) { _, item in
                     guard let item, case .root = item else { return }
-                    withAnimation(reduceMotion ? nil : .easeOut(duration: ContinuumTheme.fastDuration)) {
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: SiloTheme.fastDuration)) {
                         proxy.scrollTo(item, anchor: .center)
                     }
                 }
@@ -436,16 +440,16 @@ struct TVTopMenuBar: View {
             selectRootFromMenu(root)
         } label: {
             Text(root.title)
-                .font(.system(size: ContinuumTheme.Skyline.tabLabelSize, weight: .semibold))
+                .font(.system(size: SiloTheme.Skyline.tabLabelSize, weight: .semibold))
                 .foregroundStyle(tabForeground(isSelected: isSelected, isFocused: isFocused))
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: 260)
-                .padding(.horizontal, ContinuumTheme.Skyline.tabPaddingHorizontal)
-                .padding(.vertical, ContinuumTheme.Skyline.tabPaddingVertical)
+                .padding(.horizontal, SiloTheme.Skyline.tabPaddingHorizontal)
+                .padding(.vertical, SiloTheme.Skyline.tabPaddingVertical)
                 .modifier(TVTopMenuCapsuleChrome(isSelected: isSelected, isFocused: isFocused))
         }
-        .buttonStyle(.continuumFlat)
+        .buttonStyle(.siloFlat)
         .focused($focusedItem, equals: .root(root))
         // A ScrollView is its own focus region on tvOS. At its leading edge,
         // explicitly hand Left back to the fixed Search anchor.
@@ -454,15 +458,20 @@ struct TVTopMenuBar: View {
         })
         // Down opens this tab's cascade panel (if a dwell hasn't already)
         // and hands focus straight into it, so the move never escapes to the
-        // page content behind the bar. Fires only when the engine can't move
-        // focus within the bar — i.e. the bar is a single row, so down
-        // always reaches here.
-        // `canOpenPanel` is keyed on the tab *kind* (library and For You tabs
-        // can; Home/Calendar never can) — invariant, so opening a panel never
-        // restructures this focused button (which dropped focus).
-        .modifier(TVTopMenuDownHandler(canOpenPanel: rootPanel(root) != nil) {
-            onEnterPanel(.root(root))
-        })
+        // page content behind the bar. Tabs without a panel (Home, Calendar)
+        // hand focus to the page's first item instead, so down always lands
+        // on the left-most card rather than whichever card the engine finds
+        // geometrically under the centered tab. Fires only when the engine
+        // can't move focus within the bar — i.e. the bar is a single row, so
+        // down always reaches here.
+        // The handler is attached unconditionally and `canOpenPanel` is keyed
+        // on the tab *kind* — invariant, so opening a panel never restructures
+        // this focused button (which dropped focus).
+        .modifier(TVTopMenuDownHandler(
+            canOpenPanel: rootPanel(root) != nil,
+            onDown: { onEnterPanel(.root(root)) },
+            onDownToContent: onEnterContent
+        ))
         // Panel-bearing tabs publish their bounds so the shell can center the
         // anchored dropdown under them (§5.3); other tabs have no panel.
         .modifier(TVTopMenuAnchorPublisher(panel: rootPanel(root)))
@@ -506,7 +515,7 @@ struct TVTopMenuBar: View {
     }
 
     private func tabForeground(isSelected: Bool, isFocused: Bool) -> Color {
-        if isFocused { return .continuumBackground }
+        if isFocused { return .siloBackground }
         if isSelected { return .white }
         return .white.opacity(0.62)
     }
@@ -562,20 +571,28 @@ struct TVTopMenuBar: View {
         return Button(action: onSearch) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 27, weight: .semibold))
-                .foregroundStyle(isFocused ? Color.continuumBackground : .white.opacity(0.62))
+                .foregroundStyle(isFocused ? Color.siloBackground : .white.opacity(0.62))
                 .frame(
-                    width: ContinuumTheme.Skyline.barIconSize,
-                    height: ContinuumTheme.Skyline.barIconSize
+                    width: SiloTheme.Skyline.barIconSize,
+                    height: SiloTheme.Skyline.barIconSize
                 )
                 .modifier(TVTopMenuCapsuleChrome(isSelected: false, isFocused: isFocused))
         }
-        .buttonStyle(.continuumFlat)
+        .buttonStyle(.siloFlat)
         .focused($focusedItem, equals: .search)
         // The inverse boundary keeps Search usable in the scrolling fallback;
         // in the centered layout the native focus graph resolves this first.
+        // Down hands focus to the page's first item, matching the tabs.
         .onMoveCommand { direction in
-            guard direction == .right, let firstRoot = roots.first else { return }
-            focusedItem = .root(firstRoot)
+            switch direction {
+            case .right:
+                guard let firstRoot = roots.first else { return }
+                focusedItem = .root(firstRoot)
+            case .down:
+                onEnterContent()
+            default:
+                break
+            }
         }
         .accessibilityLabel("Search")
     }
@@ -597,7 +614,7 @@ struct TVTopMenuBar: View {
                 avatar: currentProfile?.avatarEmoji,
                 imageUrl: currentProfile?.avatarImageUrl,
                 name: currentProfile?.name ?? "",
-                size: ContinuumTheme.Skyline.barIconSize,
+                size: SiloTheme.Skyline.barIconSize,
                 backgroundColor: Color.white.opacity(0.18),
                 textColor: .white
             )
@@ -608,13 +625,15 @@ struct TVTopMenuBar: View {
             // Reduce Motion drops the focus scale so the avatar snaps (§4.2).
             .scaleEffect(isFocused && !reduceMotion ? 1.05 : 1.0)
             .focusEffectDisabled()
-            .animation(reduceMotion ? nil : ContinuumTheme.springAnimation, value: isFocused)
+            .animation(reduceMotion ? nil : SiloTheme.springAnimation, value: isFocused)
         }
-        .buttonStyle(.continuumFlat)
+        .buttonStyle(.siloFlat)
         .focused($focusedItem, equals: .profile)
-        .modifier(TVTopMenuDownHandler(canOpenPanel: true) {
-            onEnterPanel(.profile)
-        })
+        .modifier(TVTopMenuDownHandler(
+            canOpenPanel: true,
+            onDown: { onEnterPanel(.profile) },
+            onDownToContent: onEnterContent
+        ))
         .modifier(TVTopMenuAnchorPublisher(panel: .profile))
         .accessibilityLabel("Profile")
         .accessibilityHint("Rest or press to open the profile menu")
@@ -690,7 +709,7 @@ struct TVTopMenuBar: View {
 
         dwellTask = Task { @MainActor in
             try? await Task.sleep(
-                nanoseconds: ContinuumTheme.Skyline.cascadeDwellMilliseconds * 1_000_000
+                nanoseconds: SiloTheme.Skyline.cascadeDwellMilliseconds * 1_000_000
             )
             guard !Task.isCancelled else { return }
             // Confirm focus is still on the same element before opening —
@@ -754,19 +773,19 @@ private struct TVTopMenuCapsuleChrome: ViewModifier {
             }
             .focusEffectDisabled()
             // Reduce Motion snaps the tab/search capsule inversion (§4.2).
-            .animation(reduceMotion ? nil : ContinuumTheme.springAnimation, value: isFocused)
+            .animation(reduceMotion ? nil : SiloTheme.springAnimation, value: isFocused)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: isSelected)
     }
 
     private var fillColor: Color {
         if isFocused { return .white }
-        if isSelected { return .continuumChromeSelectedFill }
+        if isSelected { return .siloChromeSelectedFill }
         return .clear
     }
 
     private var borderColor: Color {
         if isFocused { return .clear }
-        if isSelected { return .continuumChromeSelectedBorder }
+        if isSelected { return .siloChromeSelectedBorder }
         return .clear
     }
 }
@@ -779,7 +798,7 @@ private struct TVTopMenuCapsuleChrome: ViewModifier {
 /// the panel floats over the page on its own depth rather than needing a
 /// page scrim to darken everything behind it.
 struct TVSkylinePanelChrome: ViewModifier {
-    var cornerRadius: CGFloat = ContinuumTheme.Skyline.dropdownCornerRadius
+    var cornerRadius: CGFloat = SiloTheme.Skyline.dropdownCornerRadius
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -822,18 +841,23 @@ struct TVSkylinePanelChrome: ViewModifier {
 /// open. Toggling the attachment on a *focused* button rebuilds its subtree
 /// and drops `@FocusState`, which bounced focus back to the Home tab; keeping
 /// it invariant fixes that. The live open/enter decision is in the closure.
+///
+/// Elements without a panel route Down to `onDownToContent`, so the shell
+/// hands focus to the page's first item instead of the engine landing on
+/// whichever card is geometrically nearest the centered tab.
 private struct TVTopMenuDownHandler: ViewModifier {
     let canOpenPanel: Bool
     let onDown: () -> Void
+    let onDownToContent: () -> Void
 
-    @ViewBuilder
     func body(content: Content) -> some View {
-        if canOpenPanel {
-            content.onMoveCommand { direction in
-                if direction == .down { onDown() }
+        content.onMoveCommand { direction in
+            guard direction == .down else { return }
+            if canOpenPanel {
+                onDown()
+            } else {
+                onDownToContent()
             }
-        } else {
-            content
         }
     }
 }
@@ -1006,11 +1030,9 @@ struct TVForYouDropdown: View {
             actionButton("Favorites", systemImage: "heart.fill", id: .favorites, action: onFavorites)
             actionButton("Recommendations", systemImage: "sparkles", id: .recommendations, action: onRecommendations)
                 .modifier(TVDropdownBoundaryMoveHandler(onMoveUp: nil, onMoveDown: onExitToContent))
-
-            panelFooter
         }
-        .padding(ContinuumTheme.Skyline.dropdownPadding)
-        .frame(width: ContinuumTheme.Skyline.dropdownWidth, alignment: .leading)
+        .padding(SiloTheme.Skyline.dropdownPadding)
+        .frame(width: SiloTheme.Skyline.dropdownWidth, alignment: .leading)
         .modifier(TVSkylinePanelChrome())
         .focusSection()
         .accessibilityElement(children: .contain)
@@ -1019,35 +1041,14 @@ struct TVForYouDropdown: View {
 
     private var panelHeader: some View {
         Text("FOR YOU")
-            .font(.system(size: ContinuumTheme.Skyline.dropdownHeaderSize, design: .monospaced))
-            .tracking(ContinuumTheme.Skyline.dropdownHeaderSize * 0.26)
+            .font(.system(size: SiloTheme.Skyline.dropdownHeaderSize, design: .monospaced))
+            .tracking(SiloTheme.Skyline.dropdownHeaderSize * 0.26)
             .foregroundStyle(Color.white.opacity(0.38))
             .lineLimit(1)
             .padding(.horizontal, 16)
             .padding(.top, 8)
             .padding(.bottom, 2)
             .accessibilityHidden(true)
-    }
-
-    private var panelFooter: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Rectangle()
-                .fill(Color.continuumDivider)
-                .frame(height: 1)
-                .padding(.horizontal, 12)
-                .padding(.top, 6)
-
-            Text("Press opens the section · Menu closes")
-                .font(.system(size: ContinuumTheme.Skyline.dropdownHeaderSize, design: .monospaced))
-                .tracking(1.2)
-                .foregroundStyle(Color.white.opacity(0.34))
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-                .padding(.bottom, 4)
-        }
-        .accessibilityHidden(true)
     }
 
     @ViewBuilder
@@ -1063,7 +1064,7 @@ struct TVForYouDropdown: View {
                 .frame(width: 30)
 
             Text(title)
-                .font(.system(size: ContinuumTheme.Skyline.dropdownRowTextSize, weight: .semibold))
+                .font(.system(size: SiloTheme.Skyline.dropdownRowTextSize, weight: .semibold))
                 .lineLimit(1)
 
             Spacer(minLength: 0)
@@ -1204,19 +1205,9 @@ struct TVProfileDropdown: View {
             // regress existing users.
             actionButton("Switch Server", systemImage: "server.rack", id: .switchServer, action: onSwitchServer)
             actionButton("Sign Out", systemImage: "rectangle.portrait.and.arrow.right", id: .signOut, isDestructive: true, action: onSignOut)
-
-            divider
-
-            Text("Press Menu to close")
-                .font(.system(size: ContinuumTheme.Skyline.dropdownHeaderSize, design: .monospaced))
-                .tracking(1.4)
-                .foregroundStyle(Color.white.opacity(0.38))
-                .padding(.horizontal, 16)
-                .padding(.bottom, 4)
-                .accessibilityHidden(true)
         }
-        .padding(ContinuumTheme.Skyline.dropdownPadding)
-        .frame(width: ContinuumTheme.Skyline.dropdownWidth, alignment: .leading)
+        .padding(SiloTheme.Skyline.dropdownPadding)
+        .frame(width: SiloTheme.Skyline.dropdownWidth, alignment: .leading)
         .modifier(TVSkylinePanelChrome())
         .focusSection()
         .accessibilityElement(children: .contain)
@@ -1242,7 +1233,7 @@ struct TVProfileDropdown: View {
 
                 if let serverHost, !serverHost.isEmpty {
                     Text(serverHost.uppercased())
-                        .font(.system(size: ContinuumTheme.Skyline.dropdownHeaderSize, design: .monospaced))
+                        .font(.system(size: SiloTheme.Skyline.dropdownHeaderSize, design: .monospaced))
                         .tracking(1.4)
                         .foregroundStyle(Color.white.opacity(0.38))
                         .lineLimit(1)
@@ -1255,7 +1246,7 @@ struct TVProfileDropdown: View {
 
     private var divider: some View {
         Rectangle()
-            .fill(Color.continuumDivider)
+            .fill(Color.siloDivider)
             .frame(height: 1)
             .padding(.horizontal, 12)
     }
@@ -1274,7 +1265,7 @@ struct TVProfileDropdown: View {
                 .frame(width: 30)
 
             Text(title)
-                .font(.system(size: ContinuumTheme.Skyline.dropdownRowTextSize, weight: .semibold))
+                .font(.system(size: SiloTheme.Skyline.dropdownRowTextSize, weight: .semibold))
                 .lineLimit(1)
 
             Spacer(minLength: 0)
@@ -1324,13 +1315,13 @@ private struct TVProfileMenuButtonBody: View {
             )
             .opacity(configuration.isPressed ? 0.75 : 1.0)
             .focusEffectDisabled()
-            // Reduce Motion snaps the profile-menu row inversion (§4.2).
-            .animation(reduceMotion ? nil : ContinuumTheme.springAnimation, value: isFocused)
-            .animation(reduceMotion ? nil : .easeOut(duration: ContinuumTheme.fastDuration), value: configuration.isPressed)
+            // Match the cascade: focus feedback follows each press immediately.
+            .animation(nil, value: isFocused)
+            .animation(reduceMotion ? nil : .easeOut(duration: SiloTheme.fastDuration), value: configuration.isPressed)
     }
 
     private var foregroundColor: Color {
-        if isFocused { return .continuumBackground }
+        if isFocused { return .siloBackground }
         if isDestructive { return .red.opacity(0.9) }
         return .white.opacity(0.86)
     }

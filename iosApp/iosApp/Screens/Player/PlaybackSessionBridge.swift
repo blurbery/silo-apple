@@ -211,7 +211,7 @@ actor PlaybackV3CapabilityGate {
             } else {
                 probe = Task {
                     do {
-                        let capability = try await ContinuumAPI.shared.playbackV3Capability()
+                        let capability = try await SiloAPI.shared.playbackV3Capability()
                         return NeutralProtocolV3Capability(
                             supported: PlaybackSessionBridge.supportsNeutralProtocolV3(capability),
                             authorizedMediaOrigins: capability.features.contains(
@@ -255,7 +255,7 @@ actor PlaybackV3CapabilityGate {
     }
 }
 
-/// Manages the lifecycle of a playback session with the Continuum API.
+/// Manages the lifecycle of a playback session with the Silo API.
 /// Handles session creation, periodic progress reporting, and cleanup.
 ///
 /// Owns the server playback-session lifecycle and Protocol V3 contract state.
@@ -372,7 +372,7 @@ actor PlaybackSessionBridge {
     private static let pastEndResumeClampSeconds: Double = 0.25
 
     private let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.continuum.app",
+        subsystem: Bundle.main.bundleIdentifier ?? "org.siloserver.silo",
         category: "Playback"
     )
 
@@ -513,7 +513,7 @@ actor PlaybackSessionBridge {
         reason: String
     ) async {
         do {
-            try await ContinuumAPI.shared.stopPlayback(sessionId: abandonedSessionId)
+            try await SiloAPI.shared.stopPlayback(sessionId: abandonedSessionId)
         } catch {
             logger.error(
                 "abandoned-session stop failed for \(abandonedSessionId, privacy: .public) (\(reason, privacy: .public)); server-side session may linger until idle timeout: \(MediaLogRedactor.sanitize(error), privacy: .public)"
@@ -521,6 +521,8 @@ actor PlaybackSessionBridge {
         }
     }
 
+    /// Records a server-issued candidate plan as pending until Aether commits
+    /// the matching load epoch, preserving the last committed state for rollback.
     private func stageProtocolV3Transition(
         candidateSessionId: String,
         candidatePlanId: String,
@@ -529,7 +531,11 @@ actor PlaybackSessionBridge {
     ) {
         // A newer load superseding an uncommitted candidate restores the last
         // committed bridge state and retires the abandoned allocation first.
-        rollbackAnyPendingProtocolV3Transition()
+        // A replan issued against that uncommitted candidate reuses its
+        // session id, so the "abandoned" allocation is the one about to be
+        // staged again; retiring it would DELETE the session the engine is
+        // about to read from and strand playback in 404 backoff.
+        rollbackAnyPendingProtocolV3Transition(retainingSessionId: candidateSessionId)
         pendingProtocolV3Transition = PendingProtocolV3Transition(
             priorSessionId: sessionId,
             priorSession: currentSession,
@@ -632,15 +638,35 @@ actor PlaybackSessionBridge {
         rollbackAnyPendingProtocolV3Transition()
     }
 
-    private func rollbackAnyPendingProtocolV3Transition() {
+    /// `retainingSessionId` names a session the caller is about to stage again;
+    /// it is left alive on the server instead of being retired as abandoned.
+    private func rollbackAnyPendingProtocolV3Transition(
+        retainingSessionId: String? = nil
+    ) {
         guard let pending = pendingProtocolV3Transition else { return }
         pendingProtocolV3Transition = nil
         sessionId = pending.priorSessionId
         currentSession = pending.priorSession
         activeProtocolV3 = pending.priorProtocolV3
-        if pending.candidateSessionId != pending.priorSessionId {
+        if Self.shouldRetireRolledBackCandidate(
+            candidateSessionId: pending.candidateSessionId,
+            priorSessionId: pending.priorSessionId,
+            retainingSessionId: retainingSessionId
+        ) {
             stopStaleSession(pending.candidateSessionId)
         }
+    }
+
+    /// A rolled-back candidate is retired only when nothing else still owns
+    /// it: not the committed prior session it replaced, and not a transition
+    /// that is about to stage the same session id again (a replan against an
+    /// uncommitted start reuses the start's session).
+    static func shouldRetireRolledBackCandidate(
+        candidateSessionId: String,
+        priorSessionId: String?,
+        retainingSessionId: String?
+    ) -> Bool {
+        candidateSessionId != priorSessionId && candidateSessionId != retainingSessionId
     }
 
     private func adoptSession(_ session: PlaybackSessionResponse) {
@@ -686,9 +712,7 @@ actor PlaybackSessionBridge {
         preferredQualityOverride: String? = nil
     ) async throws -> PreparedPlayback {
         logger.info("Fetching watch detail for \(contentId, privacy: .public)")
-        let watchDetail: WatchDetail = try await ContinuumAPI.shared.get(
-            "/api/v1/watch/\(contentId)"
-        )
+        let watchDetail = try await SiloAPI.shared.watchDetail(contentId: contentId)
         logger.info("Got \(watchDetail.versions.count) versions, type=\(watchDetail.type, privacy: .public)")
 
         guard !watchDetail.versions.isEmpty else {
@@ -1005,14 +1029,14 @@ actor PlaybackSessionBridge {
         // allocated if the caller has already walked away.
         let response = try await PlaybackCancellationShield.run {
             do {
-                return try await ContinuumAPI.shared.startPlaybackV3(request: request)
+                return try await SiloAPI.shared.startPlaybackV3(request: request)
             } catch let error as HTTPError {
                 guard case .network = error else { throw error }
                 // Reuse the exact request and playback_attempt_id so an
                 // ambiguous first response cannot allocate a second logical
                 // attempt. Retried inside the shield so the reclaim path below
                 // sees the final outcome, not the ambiguous one.
-                return try await ContinuumAPI.shared.startPlaybackV3(request: request)
+                return try await SiloAPI.shared.startPlaybackV3(request: request)
             }
         } reclaim: { [self] abandoned in
             guard let orphaned = Self.allocatedSessionId(in: abandoned) else { return }
@@ -1257,10 +1281,10 @@ actor PlaybackSessionBridge {
             terminal: terminal
         )
         do {
-            try await ContinuumAPI.shared.reportPlaybackRouteEventV3(event)
+            try await SiloAPI.shared.reportPlaybackRouteEventV3(event)
         } catch {
             Logger(
-                subsystem: Bundle.main.bundleIdentifier ?? "com.continuum.app",
+                subsystem: Bundle.main.bundleIdentifier ?? "org.siloserver.silo",
                 category: "Playback"
             ).warning(
                 "Protocol V3 terminal-start route event failed: \(MediaLogRedactor.sanitize(error), privacy: .public)"
@@ -1462,7 +1486,7 @@ actor PlaybackSessionBridge {
             clientCapabilities: active.snapshot.capabilities,
             clientPlaybackContext: active.snapshot.context
         )
-        let response = try await ContinuumAPI.shared.replanPlaybackV3(
+        let response = try await SiloAPI.shared.replanPlaybackV3(
             sessionId: currentSessionId,
             request: request
         )
@@ -1737,7 +1761,7 @@ actor PlaybackSessionBridge {
             diagnostics: diagnostics
         )
         do {
-            try await ContinuumAPI.shared.reportPlaybackRouteEventV3(event)
+            try await SiloAPI.shared.reportPlaybackRouteEventV3(event)
         } catch {
             logger.warning("Protocol V3 route event \(event.event, privacy: .public) failed: \(MediaLogRedactor.sanitize(error), privacy: .public)")
         }
@@ -1843,9 +1867,9 @@ actor PlaybackSessionBridge {
 
         let report = ProgressReport(position: position, isPaused: isPaused)
         do {
-            try await ContinuumAPI.shared.postVoid(
-                "/api/v1/playback/\(sid)/progress",
-                body: report
+            try await SiloAPI.shared.reportPlaybackProgress(
+                sessionId: sid,
+                report: report
             )
             consecutiveProgressFailures = 0
             emittedOrphanedSessionWarning = false
@@ -1886,7 +1910,7 @@ actor PlaybackSessionBridge {
         }
 
         do {
-            try await ContinuumAPI.shared.syncProgress(
+            try await SiloAPI.shared.syncProgress(
                 mediaItemId: contentId,
                 position: position,
                 duration: duration.isFinite && duration > 0 ? duration : 0,
@@ -1971,9 +1995,9 @@ actor PlaybackSessionBridge {
         if position.isFinite, position >= 0 {
             let report = ProgressReport(position: position, isPaused: isPaused)
             do {
-                try await ContinuumAPI.shared.postVoid(
-                    "/api/v1/playback/\(sid)/progress",
-                    body: report
+                try await SiloAPI.shared.reportPlaybackProgress(
+                    sessionId: sid,
+                    report: report
                 )
             } catch {
                 logger.warning(
@@ -1983,7 +2007,7 @@ actor PlaybackSessionBridge {
         }
 
         do {
-            try await ContinuumAPI.shared.delete("/api/v1/playback/\(sid)")
+            try await SiloAPI.shared.stopPlayback(sessionId: sid)
         } catch {
             // Best-effort delete; the server times out idle sessions on its
             // own, but a missed delete extends the grace period. Log so

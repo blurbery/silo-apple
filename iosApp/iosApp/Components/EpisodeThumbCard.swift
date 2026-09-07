@@ -4,8 +4,8 @@ import SwiftUI
 /// "Next Up", "Continue Watching", etc.
 ///
 /// Shows the episode still / backdrop, series title, and episode metadata.
-/// tvOS keeps the artwork clear except for server-configured card overlays;
-/// compact S/E artwork badges remain available to the touch layouts.
+/// Episode numbering stays in accessibility and detail metadata rather than
+/// being drawn over the artwork.
 /// On tvOS the image sits inside a `.card` button for focus lift/parallax and
 /// a FocusState binding drives the title highlight.
 struct EpisodeThumbCard: View {
@@ -50,10 +50,10 @@ struct EpisodeThumbCard: View {
     #endif
 
     private var cardWidth: CGFloat {
-        ContinuumTheme.thumbnailCardWidth * uiCustomization.cardPresentation.posterSize.scale
+        SiloTheme.thumbnailCardWidth * uiCustomization.cardPresentation.posterSize.scale
     }
     private var cardHeight: CGFloat {
-        cardWidth * (ContinuumTheme.thumbnailCardHeight / ContinuumTheme.thumbnailCardWidth)
+        cardWidth * (SiloTheme.thumbnailCardHeight / SiloTheme.thumbnailCardWidth)
     }
 
     #if os(tvOS)
@@ -73,11 +73,11 @@ struct EpisodeThumbCard: View {
             if uiCustomization.cardPresentation.caption.showsTitle {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(displayTitle)
-                        .font(.continuumPosterTitle)
+                        .font(.siloPosterTitle)
                         .foregroundStyle(
                             isFocused
-                                ? Color.continuumOnSurface
-                                : Color.continuumOnSurface.opacity(0.85)
+                                ? Color.siloOnSurface
+                                : Color.siloOnSurface.opacity(0.85)
                         )
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -88,8 +88,8 @@ struct EpisodeThumbCard: View {
                     if uiCustomization.cardPresentation.caption.showsMetadata,
                        let subtitle = subtitleLine {
                         Text(subtitle)
-                            .font(.continuumPosterMetadata)
-                            .foregroundStyle(Color.continuumSecondaryText)
+                            .font(.siloPosterMetadata)
+                            .foregroundStyle(Color.siloSecondaryText)
                             .lineLimit(1)
                             .truncationMode(.tail)
                             .frame(width: cardWidth, alignment: .leading)
@@ -142,15 +142,15 @@ struct EpisodeThumbCard: View {
                 thumbnail
                 if uiCustomization.cardPresentation.caption.showsTitle {
                     Text(displayTitle)
-                        .font(.continuumSubheadline)
-                        .foregroundStyle(Color.continuumOnSurface)
+                        .font(.siloSubheadline)
+                        .foregroundStyle(Color.siloOnSurface)
                         .lineLimit(1)
                 }
                 if uiCustomization.cardPresentation.caption.showsMetadata,
                    let subtitle = subtitleLine {
                     Text(subtitle)
-                        .font(.continuumCaption)
-                        .foregroundColor(.continuumSecondaryText)
+                        .font(.siloCaption)
+                        .foregroundColor(.siloSecondaryText)
                         .lineLimit(1)
                 }
             }
@@ -174,22 +174,21 @@ struct EpisodeThumbCard: View {
             )
             .frame(width: cardWidth, height: cardHeight)
             .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: ContinuumTheme.cornerRadius))
+            .clipShape(RoundedRectangle(cornerRadius: SiloTheme.cornerRadius))
 
             #if !os(tvOS)
-            // Scrim gradient so the compact episode badge reads over bright stills.
+            // Scrim keeps bottom overlays and progress legible over bright stills.
             LinearGradient(
                 colors: [.clear, .black.opacity(0.75)],
                 startPoint: .center,
                 endPoint: .bottom
             )
             .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: ContinuumTheme.cornerRadius))
+            .clipShape(RoundedRectangle(cornerRadius: SiloTheme.cornerRadius))
             #endif
 
             // Server / user-customized overlay badges. `wide` variant
-            // gives the bottom corners enough headroom that they don't
-            // collide with the S/E text + progress bar.
+            // gives the bottom corners enough headroom for the progress bar.
             if overlayStore.enabled {
                 CardOverlays(
                     data: resolvedOverlayData,
@@ -197,26 +196,8 @@ struct EpisodeThumbCard: View {
                     variant: .wide
                 )
                 .frame(width: cardWidth, height: cardHeight)
-                .clipShape(RoundedRectangle(cornerRadius: ContinuumTheme.cornerRadius))
+                .clipShape(RoundedRectangle(cornerRadius: SiloTheme.cornerRadius))
             }
-
-            #if !os(tvOS)
-            // Compact touch-layout episode badge. Apple TV landing cards keep
-            // this corner clear; server-configured quality/audio overlays above
-            // remain unchanged.
-            if let badge = episodeBadge {
-                Text(badge)
-                    .font(.continuumCaption)
-                    .fontWeight(.semibold)
-                    .foregroundColor(.white)
-                    .padding(.horizontal, badgeHPadding)
-                    .padding(.vertical, badgeVPadding)
-                    .background(
-                        Capsule().fill(Color.black.opacity(0.65))
-                    )
-                    .padding(badgeInset)
-            }
-            #endif
 
             // Progress bar (resume)
             if showProgress, let p = progressValue, p > 0 {
@@ -225,7 +206,7 @@ struct EpisodeThumbCard: View {
                     ProgressBar(value: p)
                 }
                 .frame(width: cardWidth, height: cardHeight)
-                .clipShape(RoundedRectangle(cornerRadius: ContinuumTheme.cornerRadius))
+                .clipShape(RoundedRectangle(cornerRadius: SiloTheme.cornerRadius))
             }
 
             // Watched check
@@ -234,12 +215,12 @@ struct EpisodeThumbCard: View {
                     Spacer()
                     ZStack {
                         Circle()
-                            .fill(Color.continuumOnSurface)
+                            .fill(Color.siloOnSurface)
                             .frame(width: checkBadgeSize, height: checkBadgeSize)
                             .shadow(color: .black.opacity(0.3), radius: 4)
                         Image(systemName: "checkmark")
                             .font(.system(size: checkIconSize, weight: .bold))
-                            .foregroundColor(Color.continuumBackground)
+                            .foregroundColor(Color.siloBackground)
                     }
                 }
                 .padding(badgeInset)
@@ -286,8 +267,11 @@ struct EpisodeThumbCard: View {
         item.seriesTitle ?? item.title
     }
 
-    /// Secondary line — episode title for episodes, otherwise year.
+    /// Secondary line — "S01E02 · Pilot" for episodes, otherwise year.
     private var subtitleLine: String? {
+        if let episodeLine = EpisodeCardCaption.line(for: item) {
+            return episodeLine
+        }
         if item.seriesTitle != nil {
             return item.title
         }
@@ -299,10 +283,9 @@ struct EpisodeThumbCard: View {
 
     private var accessibilityDescription: String {
         var components = [displayTitle]
-        if let episodeBadge {
-            components.append(episodeBadge)
-        }
-        if let subtitleLine {
+        if let episodeAccessibilityLabel {
+            components.append(episodeAccessibilityLabel)
+        } else if let subtitleLine {
             components.append(subtitleLine)
         }
         if isPlayed {
@@ -311,12 +294,8 @@ struct EpisodeThumbCard: View {
         return components.joined(separator: ", ")
     }
 
-    /// "S1 · E4" badge if we have season+episode numbers.
-    private var episodeBadge: String? {
-        if let season = item.seasonNumber, let episode = item.episodeNumber {
-            return "S\(season) · E\(episode)"
-        }
-        return nil
+    private var episodeAccessibilityLabel: String? {
+        EpisodeCardCaption.accessibilityLabel(for: item)
     }
 
     private var progressValue: Double? {
@@ -330,22 +309,6 @@ struct EpisodeThumbCard: View {
     }
 
     // MARK: - Metrics
-
-    private var badgeHPadding: CGFloat {
-        #if os(tvOS)
-        return 14
-        #else
-        return 8
-        #endif
-    }
-
-    private var badgeVPadding: CGFloat {
-        #if os(tvOS)
-        return 7
-        #else
-        return 4
-        #endif
-    }
 
     private var badgeInset: CGFloat {
         #if os(tvOS)
@@ -389,7 +352,7 @@ struct EpisodeThumbCard: View {
             radius: isFocused ? 20 : 8,
             y: isFocused ? 10 : 4
         )
-        .animation(.easeOut(duration: ContinuumTheme.fastDuration), value: isFocused)
+        .animation(.easeOut(duration: SiloTheme.fastDuration), value: isFocused)
         .applyEpisodePlayPauseAction(playAction)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)

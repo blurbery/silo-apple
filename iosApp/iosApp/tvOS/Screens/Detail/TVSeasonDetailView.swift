@@ -106,7 +106,7 @@ struct TVSeasonDetailView<BelowSynopsis: View>: View {
                         }
                         detailsSection
                     }
-                    .padding(.horizontal, ContinuumTheme.safePadding)
+                    .padding(.horizontal, SiloTheme.safePadding)
                     .padding(.bottom, 160)
                 }
             }
@@ -120,6 +120,7 @@ struct TVSeasonDetailView<BelowSynopsis: View>: View {
                 episodeSectionId: episodeSectionScrollId,
                 heroId: heroScrollId
             )
+            .tvActionPopoverHost()
         }
     }
 
@@ -183,29 +184,46 @@ struct TVSeasonDetailView<BelowSynopsis: View>: View {
         )
     }
 
-    @ViewBuilder
+    private enum MoreAction: String {
+        case favorite, watched, series
+    }
+
     private var moreMenu: some View {
-        TVCircleMenuButton(accessibilityLabel: "More options") {
-            Button(action: onToggleFavorite) {
-                Label(
-                    isFavorite ? "Remove from Favorites" : "Add to Favorites",
-                    systemImage: isFavorite ? "heart.fill" : "heart"
-                )
-            }
-            Button(action: onToggleWatched) {
-                Label(
-                    isWatched ? "Mark Season Unwatched" : "Mark Season Watched",
-                    systemImage: isWatched ? "checkmark.circle.fill" : "checkmark.circle"
-                )
-            }
-            if let seriesId = detail.seriesId {
-                Button {
-                    onNavigateToItem(seriesId)
-                } label: {
-                    Label("Go to Series", systemImage: "tv")
+        TVCircleMenuButton(
+            title: "More",
+            accessibilityLabel: "More options",
+            items: {
+                var items: [TVActionPopoverItem] = [
+                    TVActionPopoverItem(
+                        id: MoreAction.favorite.rawValue,
+                        title: isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                        systemImage: isFavorite ? "heart.fill" : "heart"
+                    ),
+                    TVActionPopoverItem(
+                        id: MoreAction.watched.rawValue,
+                        title: isWatched ? "Mark Season Unwatched" : "Mark Season Watched",
+                        systemImage: isWatched ? "checkmark.circle.fill" : "checkmark.circle"
+                    ),
+                ]
+                if detail.seriesId != nil {
+                    items.append(TVActionPopoverItem(
+                        id: MoreAction.series.rawValue,
+                        title: "Go to Series",
+                        systemImage: "tv"
+                    ))
+                }
+                return items
+            },
+            onSelect: { item in
+                switch MoreAction(rawValue: item.id) {
+                case .favorite: onToggleFavorite()
+                case .watched: onToggleWatched()
+                case .series:
+                    if let seriesId = detail.seriesId { onNavigateToItem(seriesId) }
+                case .none: break
                 }
             }
-        }
+        )
     }
 
     private var nextUpEpisode: EpisodeListItem? {
@@ -269,13 +287,13 @@ struct TVSeasonDetailView<BelowSynopsis: View>: View {
             if isLoadingEpisodes {
                 HStack {
                     Spacer()
-                    ProgressView().tint(.continuumOnSurface).padding()
+                    ProgressView().tint(.siloOnSurface).padding()
                     Spacer()
                 }
             } else if episodes.isEmpty {
                 Text("No episodes available")
                     .font(.system(size: 22, weight: .regular))
-                    .foregroundColor(.continuumSecondaryText)
+                    .foregroundColor(.siloSecondaryText)
             } else {
                 TVEpisodeRail(
                     episodes: episodes,

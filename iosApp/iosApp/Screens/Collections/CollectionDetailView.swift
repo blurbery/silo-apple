@@ -8,11 +8,18 @@ struct CollectionDetailView: View {
     @State private var isLoading = false
     @State private var error: ErrorState?
     @State private var uiCustomization = UICustomizationPreferences.shared
+    @State private var gridWidth: CGFloat = 0
     @Environment(AppRouter.self) private var router
     @Environment(\.horizontalSizeClass) private var hSize
 
     private var columns: [GridItem] {
-        AdaptiveColumns.posters(
+        if usesThreeColumnPhoneLayout {
+            return Array(
+                repeating: GridItem(.flexible(), spacing: 12),
+                count: 3
+            )
+        }
+        return AdaptiveColumns.posters(
             for: hSize,
             posterSize: uiCustomization.cardPresentation.posterSize
         )
@@ -34,9 +41,9 @@ struct CollectionDetailView: View {
                 )
             }
         }
-        .continuumBackground()
+        .siloPageBackground()
         .navigationTitle("Collection")
-        .continuumNavigationTitleDisplayMode(.large)
+        .siloNavigationTitleDisplayMode(.large)
         .task {
             await loadItems()
         }
@@ -60,12 +67,21 @@ struct CollectionDetailView: View {
                             router.navigate(to: .itemDetail(browseItem: item))
                         },
                         playAction: playAction(for: item),
-                        contentId: item.contentId
+                        contentId: item.contentId,
+                        cardWidthOverride: phoneCardWidthOverride
                     )
                     .frame(maxWidth: .infinity)
                 }
             }
-            .padding(ContinuumTheme.padding)
+            #if os(iOS)
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.width
+            } action: { width in
+                guard abs(width - gridWidth) >= 0.5 else { return }
+                gridWidth = width
+            }
+            #endif
+            .padding(SiloTheme.padding)
         }
     }
 
@@ -84,6 +100,24 @@ struct CollectionDetailView: View {
         #endif
     }
 
+    private var usesThreeColumnPhoneLayout: Bool {
+        #if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .phone
+        #else
+        false
+        #endif
+    }
+
+    private var phoneCardWidthOverride: CGFloat? {
+        guard usesThreeColumnPhoneLayout else { return nil }
+        let fittedWidth = AdaptiveColumns.fittedPosterWidth(
+            containerWidth: gridWidth,
+            columnCount: 3,
+            spacing: 12
+        )
+        return fittedWidth / uiCustomization.cardPresentation.posterSize.scale
+    }
+
     private func loadItems() async {
         // Hydrate from cache so a return visit paints the previous grid
         // instantly while the silent revalidate runs.
@@ -97,8 +131,8 @@ struct CollectionDetailView: View {
         }
         error = nil
         do {
-            let response: CatalogResponse = try await ContinuumAPI.shared.get(
-                "/api/v1/collections/\(collectionId)/items"
+            let response: CatalogResponse = try await SiloAPI.shared.collectionItems(
+                collectionId: collectionId, offset: 0, limit: 200
             )
             ResponseCache.shared.set(response, for: cacheKey)
             items = response.items

@@ -2,7 +2,7 @@ name: Silo
 options:
   bundleIdPrefix: org.siloserver.silo
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "18.0"
     macOS: "26.0"
     tvOS: "26.0"
   createIntermediateGroups: true
@@ -12,8 +12,9 @@ settings:
   configs:
     Debug:
       # Required for `@testable import Silo` in SiloTests; Xcode's Debug
-      # template sets this but XcodeGen does not.
+      # template sets these defaults but XcodeGen does not.
       ENABLE_TESTABILITY: "YES"
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DEBUG"
   base:
     SWIFT_VERSION: "5"
     ENABLE_USER_SCRIPT_SANDBOXING: false
@@ -56,11 +57,17 @@ packages:
   # The only media engine in the replacement player. Keep this at an exact
   # reviewed revision; Package.resolved also freezes its binary dependencies.
   AetherEngine:
-    url: https://github.com/blurbery/AetherEngine
-    revision: e238d1d2da52b58bffd7f8135bb2b04e32915cee
+    url: https://github.com/Silo-Server/AetherEngine
+    revision: f8239c206097c88b53492b281af15cf906c8295b
+  SwiftAssRenderer:
+    url: https://github.com/mihai8804858/swift-ass-renderer
+    exactVersion: 1.3.1
+  SwiftLibass:
+    url: https://github.com/mihai8804858/swift-libass
+    exactVersion: 1.4.0
   Nuke:
     url: https://github.com/kean/Nuke
-    from: "12.8.0"
+    from: "13.2.0"
 
 targets:
   Silo:
@@ -75,8 +82,6 @@ targets:
           - "macOS/**"
       - path: Resources
         buildPhase: resources
-        excludes:
-          - startup_splash.mp4
     # PRODUCT_BUNDLE_IDENTIFIER and CODE_SIGN_ENTITLEMENTS live in
     # Signing/Silo.xcconfig so local contributors can override
     # them via Signing/Local.xcconfig without dirtying this file.
@@ -105,6 +110,10 @@ targets:
     dependencies:
       - package: AetherEngine
         product: AetherEngine
+      - package: SwiftAssRenderer
+        product: SwiftAssRenderer
+      - package: SwiftLibass
+        product: SwiftLibass
       - package: Nuke
         product: Nuke
       - package: Nuke
@@ -130,8 +139,6 @@ targets:
           - "macOS/**"
       - path: Resources
         buildPhase: resources
-        excludes:
-          - startup_splash.mp4
     # PRODUCT_BUNDLE_IDENTIFIER and CODE_SIGN_ENTITLEMENTS live in
     # Signing/SiloTV.xcconfig so local contributors can override
     # them via Signing/Local.xcconfig without dirtying this file.
@@ -153,6 +160,10 @@ targets:
     dependencies:
       - package: AetherEngine
         product: AetherEngine
+      - package: SwiftAssRenderer
+        product: SwiftAssRenderer
+      - package: SwiftLibass
+        product: SwiftLibass
       - package: Nuke
         product: Nuke
       - package: Nuke
@@ -182,8 +193,6 @@ targets:
       - path: iosApp/tvOS/Caching/PosterImageCache.swift
       - path: Resources
         buildPhase: resources
-        excludes:
-          - startup_splash.mp4
     configFiles:
       Debug: Signing/SiloMac.xcconfig
       Release: Signing/SiloMac.xcconfig
@@ -199,6 +208,10 @@ targets:
     dependencies:
       - package: AetherEngine
         product: AetherEngine
+      - package: SwiftAssRenderer
+        product: SwiftAssRenderer
+      - package: SwiftLibass
+        product: SwiftLibass
       - package: Nuke
         product: Nuke
       - package: Nuke
@@ -298,10 +311,18 @@ targets:
         excludes:
           # Re-declared below with an explicit build phase. Both spellings:
           # the directory itself, and everything under it.
+          - "Fixtures/ASS"
+          - "Fixtures/ASS/**"
           - "Fixtures/SettingsContract"
           - "Fixtures/SettingsContract/**"
           - "Fixtures/PlaybackV3"
           - "Fixtures/PlaybackV3/**"
+      - path: Tests/Fixtures/ASS/SiloASSFixture.ttf
+        buildPhase: resources
+      - path: Tests/Fixtures/ASS/authored.mkv
+        buildPhase: resources
+      - path: Tests/Fixtures/ASS/authored.ass
+        buildPhase: resources
       # The vendored settings contract. SettingsConformanceTests reads both
       # files out of the test bundle at runtime and fails hard when either is
       # missing, so the build phase is stated rather than left to XcodeGen's

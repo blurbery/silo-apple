@@ -9,6 +9,9 @@ struct PlayerView: View {
     let preferredSubtitleTrackIndex: Int?
     let startFromBeginning: Bool
     let resumePositionOverride: Double?
+    /// Continue Watching resume intent: select the server's last-used file
+    /// before the profile-wide quality preference.
+    let prefersLastUsedVersion: Bool
     /// Set when the caller wants offline playback of a completed download.
     /// Routes the prepare through `OfflinePlaybackBuilder` (stored manifest
     /// + local media file, no server session) so playback works with no
@@ -27,6 +30,7 @@ struct PlayerView: View {
         preferredSubtitleTrackIndex: Int? = nil,
         startFromBeginning: Bool = false,
         resumePositionOverride: Double? = nil,
+        prefersLastUsedVersion: Bool = false,
         offlineDownloadId: String? = nil
     ) {
         self.contentId = contentId
@@ -35,6 +39,7 @@ struct PlayerView: View {
         self.preferredSubtitleTrackIndex = preferredSubtitleTrackIndex
         self.startFromBeginning = startFromBeginning
         self.resumePositionOverride = resumePositionOverride
+        self.prefersLastUsedVersion = prefersLastUsedVersion
         self.offlineDownloadId = offlineDownloadId
     }
 
@@ -71,6 +76,8 @@ struct PlayerView: View {
 
                 if viewModel.isLoading || viewModel.isBuffering {
                     PlayerBufferingCapsule()
+                } else if viewModel.isLoadingSubtitles {
+                    PlayerBufferingCapsule(label: "Loading subtitles…")
                 }
 
                 if let notice = viewModel.activeNotice {
@@ -106,6 +113,7 @@ struct PlayerView: View {
                 preferredSubtitleTrackIndex: preferredSubtitleTrackIndex,
                 startFromBeginning: startFromBeginning,
                 resumePositionOverride: resumePositionOverride,
+                prefersLastUsedVersion: prefersLastUsedVersion,
                 offlineDownloadId: offlineDownloadId
             )
         }
@@ -131,7 +139,10 @@ struct PlayerView: View {
             AetherPlayerSurface(engine: viewModel.aetherEngine)
             AetherSubtitleOverlay(
                 engine: viewModel.aetherEngine,
+                assSubtitles: viewModel.assSubtitles,
                 sourceTime: viewModel.currentTime,
+                primaryUsesMovieTimeline: viewModel.subtitleUsesMovieTimeline(viewModel.selectedSubtitleId),
+                secondaryUsesMovieTimeline: viewModel.subtitleUsesMovieTimeline(viewModel.selectedSecondarySubtitleId, slot: .secondary),
                 livePrimaryCues: viewModel.selectedSubtitleId.map(SubtitleTrackIdSpace.isAILive) == true
                     ? viewModel.livePrimarySubtitleCues
                     : [],
@@ -196,10 +207,10 @@ struct PlayerView: View {
         VStack(spacing: 16) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 40))
-                .foregroundStyle(Color.continuumError)
+                .foregroundStyle(Color.siloError)
 
             Text(error)
-                .font(.continuumBody)
+                .font(.siloBody)
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 520)

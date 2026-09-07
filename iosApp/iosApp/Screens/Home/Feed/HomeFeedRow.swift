@@ -13,10 +13,6 @@ struct HomeFeedRow: View {
     /// Long-press actions, forwarded to every card in the row.
     var onRemoveFromContinueWatching: ((SectionItem) -> Void)? = nil
     var onSetWatched: ((SectionItem, Bool) async -> Bool)? = nil
-    /// Continue Watching reports only the card that has finished settling in
-    /// the center. Home uses it to change a fixed backdrop wash; no feed layout
-    /// state depends on this callback.
-    var onCenteredResumeItemChange: ((SectionItem?) -> Void)? = nil
     @State private var uiCustomization = UICustomizationPreferences.shared
     @State private var visibleItemId: String?
     @Environment(AppRouter.self) private var router
@@ -58,30 +54,28 @@ struct HomeFeedRow: View {
     @ViewBuilder
     private var rowScroller: some View {
         cardsScroll
-            .scrollTargetBehavior(.viewAligned(limitBehavior: .always))
-            .scrollPosition(id: $visibleItemId, anchor: .center)
+            .scrollTargetBehavior(HorizontalMediaRailLayout.targetBehavior)
+            .scrollPosition(id: $visibleItemId, anchor: HorizontalMediaRailLayout.scrollAnchor)
             .environment(\.itemDetailBrowseSource, detailBrowseSource)
             .onAppear {
                 let initialId = validSelectionId(
                     preferred: visibleItemId ?? section.items.first?.contentId
                 )
                 visibleItemId = initialId
-                publishResumeSelection(initialId)
             }
             .onChange(of: section.items.map(\.contentId)) { _, newIds in
                 let preferred = newIds.contains(visibleItemId ?? "")
                     ? visibleItemId
                     : newIds.first
                 visibleItemId = preferred
-                publishResumeSelection(preferred)
-            }
-            .onScrollPhaseChange { _, newPhase in
-                guard newPhase == .idle else { return }
-                publishResumeSelection(visibleItemId)
             }
             #if os(iOS)
             .onChange(of: router.presentedItemDetail) { _, presentation in
-                guard presentation?.browseSource?.originID == detailBrowseSource.originID,
+                // Only iPad's horizontally paged detail deck drives its source
+                // row. An iPhone detail opens in place; scrolling the row while
+                // its zoom transition is restoring it creates a visible drift.
+                guard !HorizontalMediaRailLayout.isPhone,
+                      presentation?.browseSource?.originID == detailBrowseSource.originID,
                       let contentID = presentation?.contentId,
                       section.items.contains(where: { $0.contentId == contentID })
                 else { return }
@@ -95,7 +89,7 @@ struct HomeFeedRow: View {
 
     private var cardsScroll: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: cardSpacing) {
+            LazyHStack(alignment: HorizontalMediaRailLayout.cardAlignment, spacing: cardSpacing) {
                 ForEach(section.items) { item in
                     Group {
                         if usesStills {
@@ -105,6 +99,7 @@ struct HomeFeedRow: View {
                                     * uiCustomization.cardPresentation.posterSize.scale,
                                 showsCaption: uiCustomization.cardPresentation.caption.showsTitle,
                                 showsMetadata: uiCustomization.cardPresentation.caption.showsMetadata,
+                                opensResumeContext: isResume,
                                 onRemoveFromContinueWatching: removalAction(for: item),
                                 onSetWatched: watchedAction(for: item)
                             )
@@ -115,8 +110,9 @@ struct HomeFeedRow: View {
                                 showsCaption: uiCustomization.cardPresentation.caption.showsTitle,
                                 showsMetadata: uiCustomization.cardPresentation.caption.showsMetadata,
                                 showsProgress: isResume,
+                                opensResumeContext: isResume,
                                 aspect: isAudiobookRow ? .square : .poster,
-                                episodeBadge: episodeBadge(for: item),
+                                episodeAccessibilityLabel: episodeAccessibilityLabel(for: item),
                                 onRemoveFromContinueWatching: removalAction(for: item),
                                 onSetWatched: watchedAction(for: item)
                             )
@@ -126,6 +122,7 @@ struct HomeFeedRow: View {
                 }
             }
             .scrollTargetLayout()
+            .phoneMediaRailBounds()
         }
         .contentMargins(.horizontal, HomeFeedMetrics.gutter, for: .scrollContent)
         .scrollClipDisabled()
@@ -146,22 +143,10 @@ struct HomeFeedRow: View {
         return preferred
     }
 
-    private func publishResumeSelection(_ id: String?) {
-        guard isResume, let onCenteredResumeItemChange else { return }
-        let selected = id.flatMap { id in
-            section.items.first(where: { $0.contentId == id })
-        }
-        onCenteredResumeItemChange(selected)
-    }
-
-    /// "S2 · E10" for an episode drawn as a poster. Episode-discovery rows
-    /// caption with the series name, so without this several episodes of one
-    /// series render as identical cards.
-    private func episodeBadge(for item: SectionItem) -> String? {
-        guard item.type.lowercased() == "episode",
-              let season = item.seasonNumber,
-              let episode = item.episodeNumber else { return nil }
-        return "S\(season) · E\(episode)"
+    /// Episode context for accessibility when episode-discovery cards are
+    /// visually captioned with their series name.
+    private func episodeAccessibilityLabel(for item: SectionItem) -> String? {
+        EpisodeCardCaption.accessibilityLabel(for: item)
     }
 
     /// Removal is only offered where it means something — a resume row.

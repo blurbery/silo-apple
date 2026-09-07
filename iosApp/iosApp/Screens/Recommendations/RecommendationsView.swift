@@ -14,8 +14,12 @@ struct RecommendationsView: View {
     var onTopMenuFocusRequest: (() -> Void)? = nil
 
     @State private var viewModel: RecommendationsViewModel
-    @State private var currentProfile: UserProfile?
     @State private var savedListSelection: SavedShortcut = .watchlist
+    #if !os(tvOS)
+    /// Feeds the shared glass strip behind the pinned header as rows scroll
+    /// under it, matching Home and the Library tab.
+    @State private var chromeScrollState = PageChromeScrollState()
+    #endif
     @Environment(AppRouter.self) private var router
 
     init(
@@ -33,14 +37,7 @@ struct RecommendationsView: View {
     var body: some View {
         rootLayout
             .task {
-                #if os(iOS)
-                async let recommendations: Void = viewModel.loadRecommendations()
-                async let profile: Void = loadCurrentProfile()
-                _ = await (recommendations, profile)
-                #else
                 await viewModel.loadRecommendations()
-                await loadCurrentProfile()
-                #endif
             }
         #if !os(tvOS)
             .refreshable {
@@ -57,40 +54,51 @@ struct RecommendationsView: View {
         tvOSPageContent
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         #else
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                SidebarToggleButton()
-
-                Text("Recommendations")
-                    .font(.continuumTitle)
-                    .foregroundColor(.continuumOnSurface)
-
-                Spacer(minLength: 8)
-
-                TabTopBarActions(
-                    profile: currentProfile,
-                    onSearch: { router.navigate(to: .search) },
-                    onOpenSettings: { router.navigate(to: .settings) },
-                    onOpenRequests: { router.navigate(to: .requestsHub) },
-                    onSwitchProfile: {
-                        router.switchProfile()
-                    },
-                    onSwitchServer: { router.navigate(to: .serverList) },
-                    onSignOut: { router.signOutAndReset() }
-                )
+        // Content scrolls under the pinned header, which sits in a top
+        // safe-area inset with the shared glass strip behind it (same
+        // structure as `LibrariesTabView`).
+        pageContent
+            .environment(chromeScrollState)
+            .safeAreaInset(edge: .top, spacing: 0) {
+                topChrome
+                    .background {
+                        PageChromeGlass(scrollState: chromeScrollState)
+                    }
             }
-            .padding(.horizontal, ContinuumTheme.padding)
-            .padding(.top, ContinuumTheme.smallPadding)
-            .padding(.bottom, ContinuumTheme.smallPadding)
-
-            pageContent
-        }
-        .continuumBackground()
+        .siloPageBackground()
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         #endif
         #endif
     }
+
+    #if !os(tvOS)
+    private var topChrome: some View {
+        HStack(spacing: 12) {
+            SidebarToggleButton()
+
+            Text("Recommendations")
+                .font(.siloTitle)
+                .foregroundColor(.siloOnSurface)
+
+            Spacer(minLength: 8)
+
+            TabTopBarActions(
+                onSearch: { router.navigate(to: .search) },
+                onOpenSettings: { router.navigate(to: .settings) },
+                onOpenRequests: { router.navigate(to: .requestsHub) },
+                onSwitchProfile: {
+                    router.switchProfile()
+                },
+                onSwitchServer: { router.navigate(to: .serverList) },
+                onSignOut: { router.signOutAndReset() }
+            )
+        }
+        .padding(.horizontal, SiloTheme.padding)
+        .padding(.top, SiloTheme.smallPadding)
+        .padding(.bottom, SiloTheme.smallPadding)
+    }
+    #endif
 
     #if os(tvOS)
     /// For You uses the exact Skyline page shell as Home. Recommendation
@@ -163,7 +171,7 @@ struct RecommendationsView: View {
             let details = await withTaskGroup(of: (String, ItemDetail?).self) { group in
                 for contentId in batch {
                     group.addTask {
-                        let detail = try? await ContinuumAPI.shared.itemDetail(
+                        let detail = try? await SiloAPI.shared.itemDetail(
                             contentId: contentId
                         )
                         return (contentId, detail)
@@ -263,8 +271,9 @@ struct RecommendationsView: View {
             #if os(tvOS)
             .padding(.top, TVTopMenuLayout.contentTopInset)
             #endif
-            .padding(.bottom, ContinuumTheme.largePadding)
+            .padding(.bottom, SiloTheme.largePadding)
         }
+        .reportsPageChromeScroll()
     }
 
     /// Shown when the server has no recommendation sections: rather than an
@@ -272,13 +281,13 @@ struct RecommendationsView: View {
     /// above acts as the selector between the two.
     @ViewBuilder
     private var savedListsFallback: some View {
-        VStack(spacing: ContinuumTheme.smallPadding) {
+        VStack(spacing: SiloTheme.smallPadding) {
             Text("No recommendations yet — showing your saved titles.")
-                .font(.continuumCaption)
-                .foregroundColor(.continuumSecondaryText)
+                .font(.siloCaption)
+                .foregroundColor(.siloSecondaryText)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, contentHorizontalPadding)
-                .padding(.top, ContinuumTheme.smallPadding)
+                .padding(.top, SiloTheme.smallPadding)
 
             switch savedListSelection {
             case .watchlist:
@@ -290,23 +299,12 @@ struct RecommendationsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Load the currently-selected profile so we can render its avatar in
-    /// the top bar. Non-fatal on failure — we fall back to a generic icon.
-    private func loadCurrentProfile() async {
-        guard let profileId = AuthService.shared.profileId else { return }
-        do {
-            let profiles = try await AuthService.shared.getProfiles()
-            currentProfile = profiles.first(where: { $0.id == profileId })
-        } catch {
-            // Leave currentProfile nil; the top bar renders a fallback.
-        }
-    }
 
     private var sectionSpacing: CGFloat {
         #if os(tvOS)
         return 30
         #else
-        return ContinuumTheme.largePadding
+        return SiloTheme.largePadding
         #endif
     }
 
@@ -314,7 +312,7 @@ struct RecommendationsView: View {
         #if os(tvOS)
         return 96
         #else
-        return ContinuumTheme.padding
+        return SiloTheme.padding
         #endif
     }
 
@@ -476,14 +474,14 @@ private struct SavedShortcutButtonBody: View {
 
     var body: some View {
         configuration.label
-            .foregroundColor(isProminent ? .continuumBackground : .continuumOnSurface)
+            .foregroundColor(isProminent ? .siloBackground : .siloOnSurface)
             .padding(.horizontal, horizontalPadding)
             .frame(height: height)
             .background(
                 Capsule()
                     .fill(
                         isProminent
-                            ? Color.continuumOnSurface.opacity(0.96)
+                            ? Color.siloOnSurface.opacity(0.96)
                             : (isSelected ? Color.white.opacity(0.14) : Color.clear)
                     )
             )
@@ -505,7 +503,7 @@ private struct SavedShortcutButtonBody: View {
             }
             .scaleEffect(isFocused ? 1.045 : 1.0)
             .shadow(
-                color: isFocused ? Color.continuumOnSurface.opacity(0.36) : .clear,
+                color: isFocused ? Color.siloOnSurface.opacity(0.36) : .clear,
                 radius: isFocused ? 18 : 0,
                 y: isFocused ? 6 : 0
             )
@@ -513,9 +511,9 @@ private struct SavedShortcutButtonBody: View {
             #if os(tvOS)
             .focusEffectDisabled()
             #endif
-            .animation(.easeOut(duration: ContinuumTheme.fastDuration), value: configuration.isPressed)
-            .animation(ContinuumTheme.springAnimation, value: isFocused)
-            .animation(ContinuumTheme.springAnimation, value: isSelected)
+            .animation(.easeOut(duration: SiloTheme.fastDuration), value: configuration.isPressed)
+            .animation(SiloTheme.springAnimation, value: isFocused)
+            .animation(SiloTheme.springAnimation, value: isSelected)
     }
 
     private var height: CGFloat {

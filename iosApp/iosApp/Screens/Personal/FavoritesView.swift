@@ -37,18 +37,71 @@ struct IOSPersonalMediaSectionPicker: View {
     }
 }
 
-/// Saved titles use compact, Home-like rails rather than stretching two cards
-/// across an iPhone. Six titles is the maximum membership of one rail; larger
-/// lists continue in as many vertically stacked rails as needed.
-struct IOSPersonalMediaCarouselRows: View {
+/// Saved titles use a fixed three-column poster grid on iPhone. iPad retains
+/// the wider Home-like rails that make better use of its additional width.
+struct IOSPersonalMediaPosterLayout: View {
     let items: [BrowseItem]
     let onUserStateChanged: (BrowseItem, MediaItemUserState) -> Void
 
     @Environment(AppRouter.self) private var router
+    @State private var uiCustomization = UICustomizationPreferences.shared
+    @State private var gridWidth: CGFloat = 0
     @State private var originID = UUID().uuidString
     @State private var rowScrollPositions: [Int: String] = [:]
 
+    @ViewBuilder
     var body: some View {
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            phoneGrid
+        } else {
+            tabletCarouselRows
+        }
+    }
+
+    private var phoneGrid: some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.flexible(), spacing: 8, alignment: .top),
+                count: 3
+            ),
+            spacing: 12
+        ) {
+            ForEach(items) { item in
+                MediaCard(
+                    title: item.title,
+                    posterUrl: item.posterUrl ?? "",
+                    thumbhash: item.posterThumbhash,
+                    year: item.year,
+                    userState: item.userState,
+                    overlayData: OverlayData.from(item),
+                    action: {
+                        router.navigate(to: .itemDetail(contentId: item.contentId))
+                    },
+                    contentId: item.contentId,
+                    cardWidthOverride: phoneCardWidthOverride,
+                    onUserStateChanged: { state in
+                        onUserStateChanged(item, state)
+                    }
+                )
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            guard abs(width - gridWidth) >= 0.5 else { return }
+            gridWidth = width
+        }
+        .environment(
+            \.itemDetailBrowseSource,
+            ItemDetailBrowseSource(
+                originID: originID,
+                contentIDs: items.map(\.contentId)
+            )
+        )
+    }
+
+    private var tabletCarouselRows: some View {
         LazyVStack(alignment: .leading, spacing: 24) {
             ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, rowItems in
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -100,6 +153,16 @@ struct IOSPersonalMediaCarouselRows: View {
                 rowScrollPositions[rowIndex] = contentID
             }
         }
+    }
+
+    /// MediaCard scales overrides by the selected global preference. Cancel
+    /// that scale, then cap the standard width to the measured grid cell.
+    private var phoneCardWidthOverride: CGFloat {
+        AdaptiveColumns.fittedPosterWidth(
+            containerWidth: gridWidth,
+            columnCount: 3,
+            spacing: 8
+        ) / uiCustomization.cardPresentation.posterSize.scale
     }
 
     private var rows: [[BrowseItem]] {
@@ -182,7 +245,7 @@ struct FavoritesView: View {
                 if filteredIOSItems.isEmpty {
                     iosSelectedSectionEmptyState
                 } else {
-                    IOSPersonalMediaCarouselRows(items: filteredIOSItems) { item, state in
+                    IOSPersonalMediaPosterLayout(items: filteredIOSItems) { item, state in
                         guard !state.isFavorite else { return }
                         withAnimation {
                             items.removeAll { $0.contentId == item.contentId }
@@ -190,8 +253,9 @@ struct FavoritesView: View {
                     }
                 }
             }
-            .padding(ContinuumTheme.padding)
+            .padding(SiloTheme.padding)
         }
+        .reportsPageChromeScroll()
     }
 
     private var filteredIOSItems: [BrowseItem] {
@@ -234,7 +298,7 @@ struct FavoritesView: View {
                 )
             }
         }
-        .continuumBackground()
+        .siloPageBackground()
         .modifier(PersonalListNavigationChrome(title: showsNavigationTitle ? "Favorites" : nil))
         .task {
             await loadFavorites()
@@ -243,8 +307,6 @@ struct FavoritesView: View {
             await loadFavorites()
         }
         #if os(tvOS)
-        .onAppear { applyFocusRequest(focusRequest) }
-        .onChange(of: focusRequest) { _, request in applyFocusRequest(request) }
         .onChange(of: items.map(\.contentId)) { _, _ in applyFocusRequest(focusRequest) }
         #endif
     }
@@ -279,8 +341,9 @@ struct FavoritesView: View {
                     .frame(maxWidth: .infinity)
                 }
             }
-            .padding(ContinuumTheme.padding)
+            .padding(SiloTheme.padding)
         }
+        .reportsPageChromeScroll()
         #endif
     }
 
@@ -295,7 +358,7 @@ struct FavoritesView: View {
                 if usesTVTopMenu {
                     Text("Favorites")
                         .font(.system(size: 64, weight: .bold))
-                        .foregroundStyle(Color.continuumOnSurface)
+                        .foregroundStyle(Color.siloOnSurface)
                 }
 
                 sectionSelector
@@ -316,17 +379,18 @@ struct FavoritesView: View {
                     .focusSection()
                 }
             }
-            .padding(.horizontal, ContinuumTheme.safePadding)
+            .padding(.horizontal, SiloTheme.safePadding)
             .padding(.top, usesTVTopMenu ? TVTopMenuLayout.contentTopInset : 20)
-            .padding(.bottom, ContinuumTheme.safePadding)
+            .padding(.bottom, SiloTheme.safePadding)
         }
+        .modifier(TVMenuEntryScroll(request: focusRequest, isTopMenuFocused: isTopMenuFocused, onReady: applyFocusRequest))
     }
 
     private var sectionSelector: some View {
         HStack(spacing: 14) {
             ForEach(FavoriteMediaSection.allCases) { section in
                 Button {
-                    withAnimation(.easeInOut(duration: ContinuumTheme.normalDuration)) {
+                    withAnimation(.easeInOut(duration: SiloTheme.normalDuration)) {
                         selectedSection = section
                     }
                 } label: {
@@ -353,15 +417,15 @@ struct FavoritesView: View {
         VStack(spacing: 16) {
             Image(systemName: selectedSection == .movies ? "film" : "tv")
                 .font(.system(size: 54, weight: .light))
-                .foregroundStyle(Color.continuumOnSurface.opacity(0.34))
+                .foregroundStyle(Color.siloOnSurface.opacity(0.34))
 
             Text("No favorite \(selectedSection.rawValue.lowercased())")
                 .font(.system(size: 30, weight: .semibold))
-                .foregroundStyle(Color.continuumOnSurface)
+                .foregroundStyle(Color.siloOnSurface)
 
             Text("Add favorites from any detail page and they will appear here.")
                 .font(.system(size: 22))
-                .foregroundStyle(Color.continuumSecondaryText)
+                .foregroundStyle(Color.siloSecondaryText)
         }
         .frame(maxWidth: .infinity, minHeight: 430)
     }
@@ -382,7 +446,7 @@ struct FavoritesView: View {
             cardWidthOverride: tvCardWidthOverride,
             onUserStateChanged: { state in
                 guard !state.isFavorite else { return }
-                withAnimation(.easeInOut(duration: ContinuumTheme.normalDuration)) {
+                withAnimation(.easeInOut(duration: SiloTheme.normalDuration)) {
                     items.removeAll { $0.contentId == item.contentId }
                 }
             }
@@ -392,7 +456,7 @@ struct FavoritesView: View {
     /// `MediaCard` applies the global size preference after this override;
     /// divide it out so the final eight-across grid stays at 176 points.
     private var tvCardWidthOverride: CGFloat {
-        ContinuumTheme.Skyline.densePosterCardWidth
+        SiloTheme.Skyline.densePosterCardWidth
             / uiCustomization.cardPresentation.posterSize.scale
     }
 
@@ -432,8 +496,8 @@ struct FavoritesView: View {
         }
         error = nil
         do {
-            let response: CatalogResponse = try await ContinuumAPI.shared.get(
-                "/api/v1/favorites"
+            let response: CatalogResponse = try await SiloAPI.shared.favorites(
+                offset: 0, limit: 100
             )
             ResponseCache.shared.set(response, for: CacheKey.favorites)
             items = response.items
@@ -485,14 +549,14 @@ private struct FavoriteSectionPillBody: View {
         configuration.label
             .padding(.horizontal, 28)
             .padding(.vertical, 12)
-            .foregroundStyle(isFocused ? Color.continuumBackground : Color.continuumOnSurface)
+            .foregroundStyle(isFocused ? Color.siloBackground : Color.siloOnSurface)
             .background(
                 Capsule().fill(
                     isFocused
-                        ? Color.continuumOnSurface
+                        ? Color.siloOnSurface
                         : (isSelected
-                            ? Color.continuumChromeSelectedFill
-                            : Color.continuumChromeRestingFill)
+                            ? Color.siloChromeSelectedFill
+                            : Color.siloChromeRestingFill)
                 )
             )
             .overlay(
@@ -500,15 +564,15 @@ private struct FavoriteSectionPillBody: View {
                     isFocused
                         ? Color.clear
                         : (isSelected
-                            ? Color.continuumChromeSelectedBorder
-                            : Color.continuumChromeRestingBorder),
+                            ? Color.siloChromeSelectedBorder
+                            : Color.siloChromeRestingBorder),
                     lineWidth: 1
                 )
             )
             .scaleEffect(isFocused ? 1.04 : 1)
             .opacity(configuration.isPressed ? 0.82 : 1)
             .focusEffectDisabled()
-            .animation(.easeOut(duration: ContinuumTheme.fastDuration), value: isFocused)
+            .animation(.easeOut(duration: SiloTheme.fastDuration), value: isFocused)
     }
 }
 #endif

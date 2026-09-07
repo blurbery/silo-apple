@@ -8,12 +8,13 @@ struct CalendarView: View {
     /// changes (the Calendar root was selected), focus is pushed onto
     /// the filter bar so the screen never opens with a dead remote.
     var focusRequest: Int = 0
+    var isTopMenuFocused: Bool = false
     var onTopMenuFocusRequest: (() -> Void)? = nil
 
     @State private var viewModel = CalendarViewModel()
-    @State private var currentProfile: UserProfile?
     @Environment(AppRouter.self) private var router
     #if os(tvOS)
+    @State private var entryFocusRequest = 0
     /// Focus hand-off for day selection: picking a day in the week strip
     /// scrolls to that day's shelf and kicks focus onto its first card.
     @State private var shelfFocusRequest = 0
@@ -30,7 +31,6 @@ struct CalendarView: View {
         rootLayout
             .task {
                 await viewModel.load()
-                await loadCurrentProfile()
             }
         #if !os(tvOS)
             .refreshable {
@@ -44,7 +44,7 @@ struct CalendarView: View {
         #if os(tvOS)
         ZStack(alignment: .top) {
             TVRootHeroBackdrop(
-                tintColor: .continuumBackground,
+                tintColor: .siloBackground,
                 artworkURL: nil,
                 artworkThumbhash: nil,
                 isVisible: false
@@ -58,7 +58,7 @@ struct CalendarView: View {
         // No standalone title bar: the search / profile actions live inside
         // the floating calendar card so the agenda reclaims that height.
         phoneContent
-            .continuumBackground()
+            .siloPageBackground()
         #if os(iOS)
             .toolbar(.hidden, for: .navigationBar)
         #endif
@@ -80,19 +80,19 @@ struct CalendarView: View {
                         selected: viewModel.filter,
                         onSelect: { viewModel.select(filter: $0) }
                     )
-                    .padding(.horizontal, ContinuumTheme.safePadding)
-                    .padding(.top, ContinuumTheme.smallPadding)
-                    .padding(.bottom, ContinuumTheme.padding)
+                    .padding(.horizontal, SiloTheme.safePadding)
+                    .padding(.top, SiloTheme.smallPadding)
+                    .padding(.bottom, SiloTheme.padding)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                     shelfArea(proxy: proxy)
                 }
-                .padding(.bottom, ContinuumTheme.largePadding)
+                .padding(.bottom, SiloTheme.largePadding)
             }
             .safeAreaInset(edge: .top, spacing: 0) {
                 phoneWeekStrip(proxy: proxy)
             }
-            .continuumScrollEdgeEffect()
+            .siloScrollEdgeEffect()
         }
     }
 
@@ -109,12 +109,12 @@ struct CalendarView: View {
 
                 Text(viewModel.week.monthLabel)
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(.continuumOnSurface)
+                    .foregroundColor(.siloOnSurface)
 
                 if !viewModel.isCurrentWeek {
                     Button("Today") { returnToToday(proxy: proxy) }
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundColor(.continuumOnSurface)
+                        .foregroundColor(.siloOnSurface)
                         .buttonStyle(.plain)
                         .padding(.horizontal, 12)
                         .frame(height: 30)
@@ -125,7 +125,6 @@ struct CalendarView: View {
                 Spacer(minLength: 8)
 
                 TabTopBarActions(
-                    profile: currentProfile,
                     onSearch: { router.navigate(to: .search) },
                     onOpenSettings: { router.navigate(to: .settings) },
                     onOpenRequests: { router.navigate(to: .requestsHub) },
@@ -156,9 +155,9 @@ struct CalendarView: View {
             RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
-        .padding(.horizontal, ContinuumTheme.safePadding)
-        .padding(.top, ContinuumTheme.smallPadding)
-        .padding(.bottom, ContinuumTheme.smallPadding)
+        .padding(.horizontal, SiloTheme.safePadding)
+        .padding(.top, SiloTheme.smallPadding)
+        .padding(.bottom, SiloTheme.smallPadding)
         .frame(maxWidth: .infinity)
     }
 
@@ -176,7 +175,7 @@ struct CalendarView: View {
             }) else { return }
             viewModel.selectDay(today)
             DispatchQueue.main.async {
-                withAnimation(ContinuumTheme.springAnimation) {
+                withAnimation(SiloTheme.springAnimation) {
                     proxy.scrollTo(today, anchor: .top)
                 }
             }
@@ -202,13 +201,13 @@ struct CalendarView: View {
                         CalendarFilterBar(
                             selected: viewModel.filter,
                             onSelect: { viewModel.select(filter: $0) },
-                            focusRequest: focusRequest,
+                            focusRequest: entryFocusRequest,
                             onMoveUp: onTopMenuFocusRequest
                         )
 
                         Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, ContinuumTheme.safePadding)
+                    .padding(.horizontal, SiloTheme.safePadding)
                     .focusSection()
                     .id(Self.topContentId)
 
@@ -228,8 +227,9 @@ struct CalendarView: View {
                     shelfArea(proxy: proxy)
                 }
                 .padding(.top, TVTopMenuLayout.contentTopInset)
-                .padding(.bottom, ContinuumTheme.largePadding)
+                .padding(.bottom, SiloTheme.largePadding)
             }
+            .modifier(TVMenuEntryScroll(request: focusRequest, isTopMenuFocused: isTopMenuFocused) { entryFocusRequest = $0 })
         }
     }
     #endif
@@ -280,17 +280,17 @@ struct CalendarView: View {
         VStack(spacing: 12) {
             Image(systemName: "calendar.badge.exclamationmark")
                 .font(.system(size: 44))
-                .foregroundColor(.continuumOnSurface.opacity(0.3))
+                .foregroundColor(.siloOnSurface.opacity(0.3))
 
             Text(emptyTitle)
-                .font(.continuumSubheadline)
-                .foregroundColor(.continuumOnSurface)
+                .font(.siloSubheadline)
+                .foregroundColor(.siloOnSurface)
 
             Text(emptySubtitle)
-                .font(.continuumCaption)
-                .foregroundColor(.continuumSecondaryText)
+                .font(.siloCaption)
+                .foregroundColor(.siloSecondaryText)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, ContinuumTheme.largePadding)
+                .padding(.horizontal, SiloTheme.largePadding)
 
             if viewModel.filter != .everything {
                 Button("Show Everything") {
@@ -298,7 +298,7 @@ struct CalendarView: View {
                 }
                 .siloPrimaryButton()
                 .frame(width: emptyButtonWidth)
-                .padding(.top, ContinuumTheme.smallPadding)
+                .padding(.top, SiloTheme.smallPadding)
             } else {
                 // tvOS focus needs at least one target below the filter
                 // bar so d-pad down from it doesn't dead-end (see
@@ -307,9 +307,9 @@ struct CalendarView: View {
                 Button("Refresh") {
                     Task { await viewModel.refresh() }
                 }
-                .buttonStyle(ContinuumPrimaryButtonStyle())
+                .buttonStyle(SiloPrimaryButtonStyle())
                 .frame(width: emptyButtonWidth)
-                .padding(.top, ContinuumTheme.smallPadding)
+                .padding(.top, SiloTheme.smallPadding)
                 #endif
             }
         }
@@ -340,7 +340,7 @@ struct CalendarView: View {
         #if os(tvOS)
         return 6
         #else
-        return ContinuumTheme.padding
+        return SiloTheme.padding
         #endif
     }
 
@@ -348,7 +348,7 @@ struct CalendarView: View {
 
     private func selectDay(_ day: Date, proxy: ScrollViewProxy) {
         viewModel.selectDay(day)
-        withAnimation(ContinuumTheme.springAnimation) {
+        withAnimation(SiloTheme.springAnimation) {
             proxy.scrollTo(day, anchor: .top)
         }
         #if os(tvOS)
@@ -393,13 +393,13 @@ struct CalendarView: View {
         if let previous = viewModel.week.days.last(where: {
             $0 < day && viewModel.hasEvents(on: $0)
         }) {
-            withAnimation(ContinuumTheme.springAnimation) {
+            withAnimation(SiloTheme.springAnimation) {
                 proxy.scrollTo(previous, anchor: .top)
             }
             shelfFocusDay = previous
             shelfFocusRequest += 1
         } else {
-            withAnimation(ContinuumTheme.springAnimation) {
+            withAnimation(SiloTheme.springAnimation) {
                 proxy.scrollTo(Self.topContentId, anchor: .top)
             }
             stripFocusRequest += 1
@@ -407,17 +407,4 @@ struct CalendarView: View {
     }
     #endif
 
-    /// Load the active profile so the iOS top bar can render its avatar.
-    /// Non-fatal on failure — the bar falls back to a generic icon.
-    private func loadCurrentProfile() async {
-        #if !os(tvOS)
-        guard let profileId = AuthService.shared.profileId else { return }
-        do {
-            let profiles = try await AuthService.shared.getProfiles()
-            currentProfile = profiles.first(where: { $0.id == profileId })
-        } catch {
-            // Leave currentProfile nil; the top bar renders a fallback.
-        }
-        #endif
-    }
 }

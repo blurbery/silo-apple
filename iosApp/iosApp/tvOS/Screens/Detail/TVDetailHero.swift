@@ -9,7 +9,9 @@ import NukeUI
 enum TVDetailLayout {
     static let horizontalInset: CGFloat = 100
     static let heroHeight: CGFloat = 690
-    static let heroTopInset: CGFloat = 88
+    /// Shared title baseline for every detail page. Sits low enough that the
+    /// first rail below the 690pt hero bottoms out just above the safe area.
+    static let heroTopInset: CGFloat = 116
     static let heroContentWidth: CGFloat = 1_080
     static let bodySectionSpacing: CGFloat = 64
     static let sectionHeaderSpacing: CGFloat = 14
@@ -70,9 +72,8 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
     /// Optional short editorial line placed in a capsule above the title
     /// (e.g. "New Episode Friday", "Continuing Series"). Hidden when nil.
     let eyebrow: String?
-    /// Source/genre line shown under the title. Text items are
-    /// pipe-separated; a single optional rating token is rendered as an
-    /// outlined chip at the end of the row.
+    /// Source/genre labels shown under the title. The optional outlined
+    /// rating chip leads the metadata, followed by dot-separated text.
     let sourceTokens: [String]
     let ratingChip: String?
     /// Short description shown in the hero. Clamped to 3 lines.
@@ -88,6 +89,7 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
     /// reserves a stable slot while an episode's playback detail is loading,
     /// so changing carousel focus never moves the persistent action row.
     let playbackSummary: TVPlaybackSelectionSummary
+    var showsPlaybackSummary = true
     /// A compact editorial header can retain the standard Movie backdrop
     /// geometry independently of its own layout height. Nil keeps both heights
     /// coupled, which is the default behavior for every other detail page.
@@ -241,6 +243,8 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
             editorialPrimaryInformationColumn
             creditBlock
             TVPlaybackSelectionSummaryView(summary: playbackSummary)
+                .opacity(showsPlaybackSummary ? 1 : 0)
+                .accessibilityHidden(!showsPlaybackSummary)
         }
         .frame(maxWidth: editorialContentWidth, alignment: .leading)
     }
@@ -263,6 +267,8 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
         VStack(alignment: .leading, spacing: creditSummarySpacing) {
             creditBlock
             TVPlaybackSelectionSummaryView(summary: playbackSummary)
+                .opacity(showsPlaybackSummary ? 1 : 0)
+                .accessibilityHidden(!showsPlaybackSummary)
                 .frame(
                     height: playbackSummaryReservedHeight,
                     alignment: .topLeading
@@ -388,6 +394,11 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
     private func factsRow(includeSourceTokens: Bool) -> some View {
         if !factsLine.isEmpty || (includeSourceTokens && !sourceTokens.isEmpty) || ratingChip != nil {
             HStack(spacing: 14) {
+                if let ratingChip, !ratingChip.isEmpty {
+                    ratingBadge(ratingChip)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+
                 ForEach(Array(factsLine.enumerated()), id: \.offset) { index, token in
                     if index > 0 { metadataDivider }
                     factsItem(token)
@@ -400,13 +411,6 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
                             .font(.system(size: 24, weight: .medium))
                             .foregroundColor(Color.white.opacity(0.90))
                     }
-                }
-
-                if let ratingChip, !ratingChip.isEmpty {
-                    if !factsLine.isEmpty || (includeSourceTokens && !sourceTokens.isEmpty) {
-                        metadataDivider
-                    }
-                    ratingBadge(ratingChip)
                 }
             }
         }
@@ -441,7 +445,7 @@ struct TVDetailHero<Actions: View, BelowSynopsis: View>: View {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundColor(Color.continuumSuccess.opacity(0.9))
+                    .foregroundColor(Color.siloSuccess.opacity(0.9))
                 Text(value)
                     .font(.system(size: 22, weight: .medium))
                     .foregroundColor(Color.white.opacity(0.88))
@@ -736,7 +740,7 @@ enum TVHeroMetadata {
         return rating
     }
 
-    // Facts line (year · runtime · maturity · quality chips)
+    // Movie/episode year or air date and runtime; series year and season count.
 
     static func movieFactsLine(from detail: ItemDetail, version selectedVersion: FileVersion? = nil) -> [TVHeroFactToken] {
         var tokens: [TVHeroFactToken] = []
@@ -806,84 +810,6 @@ enum TVHeroMetadata {
 
     // MARK: - Helpers
 
-    private static func typeLabel(detail: ItemDetail) -> String {
-        switch detail.type.lowercased() {
-        case "movie": return "Movie"
-        case "series": return "TV Show"
-        case "episode": return "Episode"
-        default: return detail.type.capitalized
-        }
-    }
-
-    private static func qualityTokens(from detail: ItemDetail, version selectedVersion: FileVersion? = nil) -> [TVHeroFactToken] {
-        guard let version = selectedVersion ?? preferredVersion(from: detail) else { return [] }
-        var tokens: [TVHeroFactToken] = []
-        if let res = resolutionLabel(version.resolution) {
-            tokens.append(.chip(res))
-        }
-        if version.hdr == true {
-            tokens.append(.chip(dolbyVisionLabel(version: version) ?? "HDR"))
-        }
-        if let audio = primaryAudioLabel(version: version) {
-            tokens.append(.chip(audio))
-        }
-        if hasSubtitles(version: version) {
-            tokens.append(.chip("CC"))
-        }
-        return tokens
-    }
-
-    private static func preferredVersion(from detail: ItemDetail) -> FileVersion? {
-        guard let versions = detail.versions, !versions.isEmpty else { return nil }
-        if let lastId = detail.userData?.lastFileId,
-           let lastVersion = versions.first(where: { $0.fileId == lastId }) {
-            return lastVersion
-        }
-        return versions.first
-    }
-
-    private static func resolutionLabel(_ raw: String?) -> String? {
-        guard let raw = raw?.lowercased() else { return nil }
-        if raw.contains("2160") || raw.contains("4k") { return "4K" }
-        if raw.contains("1080") { return "HD" }
-        if raw.contains("720") { return "HD" }
-        if raw.contains("480") { return "SD" }
-        return nil
-    }
-
-    private static func dolbyVisionLabel(version: FileVersion) -> String? {
-        let videoTracks = version.videoTracks ?? []
-        if videoTracks.contains(where: { ($0.dolbyVision ?? "").isEmpty == false }) {
-            return "DOLBY VISION"
-        }
-        return nil
-    }
-
-    private static func primaryAudioLabel(version: FileVersion) -> String? {
-        let tracks = version.audioTracks ?? []
-        let defaultTrack = tracks.first(where: { $0.isDefault == true }) ?? tracks.first
-        guard let track = defaultTrack else { return nil }
-
-        if let layout = track.channelLayout?.lowercased() {
-            if layout.contains("atmos") { return "ATMOS" }
-            if layout.contains("7.1") { return "7.1" }
-            if layout.contains("5.1") { return "5.1" }
-            if layout.contains("stereo") || layout == "2.0" { return nil }
-        }
-        if let channels = track.channels {
-            switch channels {
-            case 8: return "7.1"
-            case 6: return "5.1"
-            default: return nil
-            }
-        }
-        return nil
-    }
-
-    private static func hasSubtitles(version: FileVersion) -> Bool {
-        !(version.subtitleTracks ?? []).isEmpty
-    }
-
     private static func formatRuntime(_ minutes: Int) -> String {
         if minutes >= 60 {
             return "\(minutes / 60)h \(minutes % 60)m"
@@ -903,26 +829,26 @@ private struct TVPlaybackSelectionSummaryView: View {
             summaryItem(
                 label: "VERSION",
                 value: summary.version,
-                slotWidth: 245,
-                placeholderWidth: 100
+                slotWidth: 313,
+                placeholderWidth: 128
             )
             summaryItem(
                 label: "AUDIO",
                 value: summary.audio,
-                slotWidth: 285,
-                placeholderWidth: 130
+                slotWidth: 364,
+                placeholderWidth: 166
             )
             summaryItem(
                 label: "SUBTITLES",
                 value: summary.subtitles,
-                slotWidth: 264,
-                placeholderWidth: 60
+                slotWidth: 338,
+                placeholderWidth: 77
             )
         }
         // This matches the compact no-Restart action-row footprint. Starts stay
         // fixed between episodes, while unusually long values scale down inside
         // their own slot instead of wrapping or extending into the artwork.
-        .frame(width: 810, height: 44, alignment: .topLeading)
+        .frame(width: 1_031, height: 44, alignment: .topLeading)
     }
 
     private func summaryItem(
@@ -933,7 +859,7 @@ private struct TVPlaybackSelectionSummaryView: View {
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label)
-                .font(.system(size: 18, weight: .bold))
+                .font(.system(size: 23, weight: .bold))
                 .tracking(0.9)
                 .foregroundColor(Color.white.opacity(0.48))
                 .lineLimit(1)
@@ -942,7 +868,7 @@ private struct TVPlaybackSelectionSummaryView: View {
             Group {
                 if let value {
                     Text(value)
-                        .font(.system(size: 18, weight: .medium))
+                        .font(.system(size: 23, weight: .medium))
                         .foregroundColor(Color.white.opacity(0.82))
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
@@ -951,7 +877,7 @@ private struct TVPlaybackSelectionSummaryView: View {
                 } else {
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .fill(Color.white.opacity(0.14))
-                        .frame(width: placeholderWidth, height: 14)
+                        .frame(width: placeholderWidth, height: 18)
                         .accessibilityHidden(true)
                 }
             }

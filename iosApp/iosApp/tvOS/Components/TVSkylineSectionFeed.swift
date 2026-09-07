@@ -1,33 +1,3 @@
-enum TVSkylineVerticalMove {
-    case up
-    case down
-}
-
-enum TVSkylineRowMoveTarget: Equatable {
-    case topMenu
-    case row(Int)
-    case none
-}
-
-/// Pure row-boundary routing used by every Skyline landing. Explicit routing
-/// avoids asking the focus engine to discover a row that is still clipped by
-/// the lower-half viewport while the vertical stack is scrolling.
-func tvSkylineRowMoveTarget(
-    currentIndex: Int,
-    rowCount: Int,
-    direction: TVSkylineVerticalMove
-) -> TVSkylineRowMoveTarget {
-    guard rowCount > 0, currentIndex >= 0, currentIndex < rowCount else {
-        return .none
-    }
-    switch direction {
-    case .up:
-        return currentIndex == 0 ? .topMenu : .row(currentIndex - 1)
-    case .down:
-        return currentIndex + 1 < rowCount ? .row(currentIndex + 1) : .none
-    }
-}
-
 #if os(tvOS)
 import SwiftUI
 
@@ -64,17 +34,11 @@ struct TVSkylineSectionFeed: View {
     /// Optional Home-only watched-state mutation. Library feeds leave this nil.
     var onSetWatched: ((SectionItem, Bool) async -> Bool)? = nil
 
-    /// Debounced focused-card state driving the marquee + backdrop.
+    /// Immediate foreground content with a separately delayed backdrop.
     @State private var marqueeModel = TVFocusMarqueeModel()
     /// Token handed only to row 1 when the shell explicitly enters content.
     /// It is never changed during ordinary row-to-row navigation.
     @State private var contentFocusToken = 0
-    /// Snaps the row band back to the first section before a focus claim.
-    /// The band clips rows outside the viewport, and tvOS refuses to focus a
-    /// clipped view — so when entry focus fires while the user is parked on a
-    /// lower row (e.g. re-clicking the current tab in the top menu), the first
-    /// card's claim silently no-ops unless the band is scrolled home first.
-    @State private var entryScrollToken = 0
     /// Entry tokens that arrived before any row mounted — sections load
     /// async, so the initial hand-down would land on nothing.
     @State private var pendingFocusRequest: Int?
@@ -83,17 +47,9 @@ struct TVSkylineSectionFeed: View {
     /// the marquee preview, this is cleared when focus moves into chrome.
     @State private var focusRestorationOwnerSectionId: String?
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     var body: some View {
         ZStack(alignment: .top) {
-            TVRootHeroBackdrop(
-                tintColor: marqueeModel.tintColor,
-                artworkURL: marqueeModel.backdropURL,
-                artworkThumbhash: marqueeModel.backdropThumbhash,
-                isVisible: marqueeModel.content != nil,
-                crossfadeDuration: ContinuumTheme.Skyline.marqueeCrossfadeDuration
-            )
+            TVSkylineBackdrop(model: marqueeModel)
 
             // Native scrolling lives only in the bottom row band. The viewport
             // clips at its top edge so rows do not paint through the marquee
@@ -101,21 +57,18 @@ struct TVSkylineSectionFeed: View {
             scrollingRows
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .ignoresSafeArea(edges: .bottom)
-                .offset(y: ContinuumTheme.Skyline.landingContentVerticalOffset)
 
             // Floats over the band above the row; never focusable or hit-testable.
-            TVFocusMarquee(
-                content: marqueeModel.content,
-                enrichment: marqueeModel.enrichment,
-                scale: marqueeScale
-            )
-            .offset(y: ContinuumTheme.Skyline.landingContentVerticalOffset)
+            TVSkylineMarquee(model: marqueeModel, scale: marqueeScale)
+            .offset(y: SiloTheme.Skyline.landingContentVerticalOffset)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
+            marqueeModel.resume()
             seedMarqueeFromFirstItem()
             requestEntryFocus(focusRequest)
         }
+        .onDisappear { marqueeModel.suspend() }
         .onChange(of: focusRequest) { _, request in requestEntryFocus(request) }
         .onChange(of: isTopMenuFocused) { _, isFocused in
             if isFocused {
@@ -137,46 +90,51 @@ struct TVSkylineSectionFeed: View {
     @ViewBuilder
     private var scrollingRows: some View {
         GeometryReader { proxy in
-            let bandHeight = proxy.size.height * ContinuumTheme.Skyline.rowBandHeightFraction
-            let visibleBandHeight = max(0, bandHeight)
+            let bandHeight = proxy.size.height * SiloTheme.Skyline.rowBandHeightFraction
+            // Position the focusable viewport with layout, not a render
+            // offset. Its bottom must match the screen's bottom: otherwise
+            // tvOS can resolve directional clicks against offscreen space
+            // while a swipe still pans far enough to reveal the next target.
+            let bandTop = min(
+                proxy.size.height,
+                max(0, proxy.size.height - bandHeight + SiloTheme.Skyline.landingContentVerticalOffset)
+            )
+            let visibleBandHeight = max(0, proxy.size.height - bandTop)
             let trailingPreviewPadding = max(
                 0,
-                visibleBandHeight - ContinuumTheme.Skyline.rowBandBottomInset
+                visibleBandHeight - SiloTheme.Skyline.rowBandBottomInset
             )
 
-            ScrollViewReader { scrollProxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    // Keep every row's focus section mounted. A LazyVStack can
-                    // remove the clipped row immediately above/below, leaving
-                    // the Focus Engine no geometric destination and tempting
-                    // callers to force focus manually.
-                    VStack(alignment: .leading, spacing: ContinuumTheme.Skyline.rowBandPreviewSpacing) {
-                        ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
-                            featuredRow(section, isFirstRow: index == 0)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .id(section.id)
-                        }
-                    }
-                    .scrollTargetLayout()
-                    // Allows the final row to top-align like every prior row,
-                    // with a blank preview area underneath instead of clamping.
-                    .padding(.bottom, trailingPreviewPadding)
-                }
-                .scrollTargetBehavior(.viewAligned)
-                // Animated ride home; the first card's focus claim is
-                // re-asserted by MediaRow until the scroll settles, so the
-                // animation can't lose the claim to mid-flight focus repairs.
-                .onChange(of: entryScrollToken) { _, _ in
-                    if let firstId = sections.first?.id {
-                        withAnimation(reduceMotion ? nil : .easeInOut(duration: ContinuumTheme.slowDuration)) {
-                            scrollProxy.scrollTo(firstId, anchor: .top)
-                        }
+            ScrollView(.vertical, showsIndicators: false) {
+                // Bound the live view graph to nearby rows. Keeping the
+                // entire feed mounted makes focus and scroll transactions
+                // traverse offscreen card, image, and button subgraphs.
+                // The native scroll container loads directional targets;
+                // its viewport uses the corrected layout frames above.
+                LazyVStack(alignment: .leading, spacing: SiloTheme.Skyline.rowBandPreviewSpacing) {
+                    ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+                        featuredRow(section, isFirstRow: index == 0)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .id(section.id)
                     }
                 }
+                .scrollTargetLayout()
+                // Allows the final row to top-align like every prior row,
+                // with a blank preview area underneath instead of clamping.
+                .padding(.bottom, trailingPreviewPadding)
             }
+            .scrollTargetBehavior(.viewAligned)
+            // Row changes animate the band; the marquee holds its backdrop
+            // swap until the scroll settles so the two never composite in
+            // the same frames.
+            .onScrollPhaseChange { _, phase in
+                marqueeModel.setBackdropDeferred(phase != .idle)
+            }
+            .modifier(TVMenuEntryScroll(request: lastAppliedRequest, isTopMenuFocused: isTopMenuFocused, onReady: claimEntryFocus))
             .frame(width: proxy.size.width, height: visibleBandHeight, alignment: .topLeading)
             .clipped()
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .bottomLeading)
+            .padding(.top, bandTop)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
     }
 
@@ -191,10 +149,15 @@ struct TVSkylineSectionFeed: View {
             // the first card so it renders already focused instead of growing
             // a few frames after the page paints. `.automatic` keeps d-pad
             // movement between rows geometric — only system-initiated
-            // resolutions use the preference. The imperative entry token
-            // below is unchanged and covers every other entry path.
+            // resolutions use the preference. While the top menu owns focus
+            // the priority is raised to `.userInitiated`: a Down press from
+            // the bar is resolved natively by the engine (the bar's
+            // `onMoveCommand` only fires when no native move exists), and
+            // without the preference it lands on whichever card sits under
+            // the centered tab instead of the left-most one. The imperative
+            // entry token below is unchanged and covers every other entry path.
             prefersDefaultFocusOnFirstItem: isFirstRow,
-            defaultFocusPriority: .automatic,
+            defaultFocusPriority: isTopMenuFocused ? .userInitiated : .automatic,
             focusRequest: isFirstRow ? contentFocusToken : 0,
             detailReturnFocusRequest: detailReturnFocusRequest,
             // This is the sole directional interception: Up from the first
@@ -205,8 +168,8 @@ struct TVSkylineSectionFeed: View {
                 focusRestorationOwnerSectionId = section.id
                 previewFocusedItem(item, in: section)
             },
-            cardWidth: ContinuumTheme.Skyline.densePosterCardWidth,
-            cardVerticalPadding: ContinuumTheme.Skyline.rowBandCardVerticalPadding,
+            cardWidth: SiloTheme.Skyline.densePosterCardWidth,
+            cardVerticalPadding: SiloTheme.Skyline.rowBandCardVerticalPadding,
             onMoveDown: nil,
             focusRestorationOwner: Binding(
                 get: { focusRestorationOwnerSectionId == section.id },
@@ -220,6 +183,7 @@ struct TVSkylineSectionFeed: View {
                 }
             )
         )
+        .modifier(TVSkylineArtworkVisibility())
     }
 
     // MARK: - Focus
@@ -242,35 +206,52 @@ struct TVSkylineSectionFeed: View {
         if isTopMenuFocused { return }
         guard request != lastAppliedRequest else { return }
         lastAppliedRequest = request
-        guard let firstSectionId = sections.first?.id else { return }
+    }
+
+    private func claimEntryFocus(_ request: Int) {
+        guard !isTopMenuFocused,
+              lastAppliedRequest == request,
+              let firstSectionId = sections.first?.id else { return }
         focusRestorationOwnerSectionId = firstSectionId
-        // Scroll the band home first, then claim on the next turn: the claim
-        // is a @FocusState write on the first row's first card, which the
-        // engine drops while that card is still clipped out of the viewport.
-        entryScrollToken += 1
-        DispatchQueue.main.async {
-            guard !isTopMenuFocused,
-                  sections.first?.id == firstSectionId else { return }
-            contentFocusToken += 1
-        }
+        contentFocusToken += 1
     }
 
     private func previewFocusedItem(_ item: SectionItem, in section: ResolvedSection) {
         marqueeModel.preview(
             TVMarqueeContent(
                 item: item,
+                rowId: section.id,
                 rowTitle: section.title,
                 isContinueWatching: section.isContinueWatchingSection
-            )
+            ),
+            neighborBackdropURLs: neighborBackdropURLs(around: item, in: section)
         )
     }
 
-    /// Cold-entry backdrop: the marquee normally waits for the first card's
-    /// focus report plus the 150 ms rest debounce, which paints the hero as
-    /// a fade-in after the page is already visible. Entry focus always lands
-    /// on the first row's first card, so pre-display that item as soon as
-    /// sections exist; if focus somehow lands elsewhere, the focus-driven
-    /// preview corrects within the debounce window.
+    /// Section-level backdrops of the cards on either side of `item` in its
+    /// row. Only direct backdrops qualify: episodes and items without one
+    /// resolve their hero art from detail enrichment, which is a metadata
+    /// request the marquee already rate-limits and must not be duplicated
+    /// here for cards the user may never rest on.
+    private func neighborBackdropURLs(
+        around item: SectionItem,
+        in section: ResolvedSection
+    ) -> [String] {
+        guard let index = section.items.firstIndex(where: { $0.id == item.id }) else { return [] }
+        let radius = SiloTheme.Skyline.marqueeNeighborBackdropPrefetchRadius
+        let window = section.items.indices.clamped(to: (index - radius)..<(index + radius + 1))
+        return window.compactMap { neighborIndex -> String? in
+            guard neighborIndex != index else { return nil }
+            let neighbor = section.items[neighborIndex]
+            guard neighbor.type.lowercased() != "episode",
+                  let url = neighbor.backdropUrl, !url.isEmpty else { return nil }
+            return url
+        }
+    }
+
+    /// Seed the first card as soon as sections exist, so cold entry does not
+    /// wait for a focus report or the backdrop rest delay. A later focus
+    /// report remains authoritative if the engine lands on another card.
     private func seedMarqueeFromFirstItem() {
         guard marqueeModel.content == nil,
               let section = sections.first,
@@ -278,12 +259,55 @@ struct TVSkylineSectionFeed: View {
         marqueeModel.seed(
             TVMarqueeContent(
                 item: item,
+                rowId: section.id,
                 rowTitle: section.title,
                 isContinueWatching: section.isContinueWatchingSection
             )
         )
     }
 
+}
+
+/// Cancel artwork work when a row leaves the viewport without removing its
+/// buttons from the native focus graph. Visibility changes only at the edge.
+private struct TVSkylineArtworkVisibility: ViewModifier {
+    @State private var isVisible = false
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.tvArtworkLoadingEnabled, isVisible)
+            .onScrollVisibilityChange(threshold: 0.01) { isVisible = $0 }
+    }
+}
+
+/// Observe preview changes at the leaves. Reading the model's properties in
+/// the feed's body makes every artwork, tint, and enrichment update rebuild
+/// the scrolling rows and their focusable cards as well.
+private struct TVSkylineBackdrop: View {
+    let model: TVFocusMarqueeModel
+
+    var body: some View {
+        TVRootHeroBackdrop(
+            tintColor: model.tintColor,
+            artworkURL: model.backdropURL,
+            artworkThumbhash: model.backdropThumbhash,
+            isVisible: model.backdropURL != nil,
+            crossfadeDuration: SiloTheme.Skyline.marqueeCrossfadeDuration
+        )
+    }
+}
+
+private struct TVSkylineMarquee: View {
+    let model: TVFocusMarqueeModel
+    let scale: TVFocusMarquee.Scale
+
+    var body: some View {
+        TVFocusMarquee(
+            content: model.content,
+            enrichment: model.enrichment,
+            scale: scale
+        )
+    }
 }
 
 #endif

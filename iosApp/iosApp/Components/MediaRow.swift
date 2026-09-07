@@ -101,7 +101,7 @@ struct MediaRow: View {
     @State private var lastAppliedDetailReturnFocusRequest = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private static let focusLogger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "com.continuum.app",
+        subsystem: Bundle.main.bundleIdentifier ?? "org.siloserver.silo",
         category: "TVFocus"
     )
     #endif
@@ -115,13 +115,12 @@ struct MediaRow: View {
         #if os(tvOS)
         .focusSection()
         .modifier(TVRowMoveHandler(onMoveUp: onMoveUp, onMoveDown: onMoveDown))
-        .onChange(of: focusedItemId) { _, newValue in
-            guard let newValue,
-                  let item = items.first(where: { $0.contentId == newValue }) else { return }
+        .modifier(TVRowFocusObserver(focusedItemId: $focusedItemId) { newValue in
+            guard let item = items.first(where: { $0.contentId == newValue }) else { return }
             lastFocusedItemId = newValue
             Self.focusLogger.debug("mediaRow.focus changed")
             onItemFocus?(item)
-        }
+        })
         .onChange(of: items.map(\.contentId)) { oldIds, newIds in
             restoreFocusAfterItemRemoval(from: oldIds, to: newIds)
         }
@@ -142,12 +141,17 @@ struct MediaRow: View {
         lastAppliedFocusRequest = request
         focusRestorationGeneration += 1
         let generation = focusRestorationGeneration
+        // A recycled row can retain this value after UIKit drops its focus.
+        // Clear it so reselecting the same entry card produces a fresh claim.
+        focusedItemId = nil
         // Scroll to the requested card first, claim a turn later: a row parked
         // deep in its strip can keep that card unmounted (LazyHStack) or clipped, and
         // the focus engine silently drops @FocusState writes to views it
         // can't focus. The instant scroll mounts/unclips the card; the
         // deferred write then lands on a focusable target.
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: ContinuumTheme.slowDuration)) {
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
             proxy.scrollTo(targetItem.id, anchor: .center)
         }
         DispatchQueue.main.async {
@@ -159,10 +163,9 @@ struct MediaRow: View {
     /// Write the claim, then verify it actually stuck and re-assert if not.
     /// A single write races two things that both win by coming later: the
     /// engine's remembered-focus repair after the top bar resigns, and the
-    /// geometric re-repairs it makes while the feed's scroll-to-top slides
-    /// rows (and their cards) under whatever it had focused. @FocusState
-    /// reflects *actual* focus, so a rejected/overridden write reads back as
-    /// a different value — retry until the scroll settles and ours is last.
+    /// layout that mounts the requested card after scrolling. @FocusState
+    /// reflects actual focus, so a rejected write reads back as a different
+    /// value. Restoration ownership cancels retries when focus leaves the row.
     private func claimRequestedItemFocus(
         _ targetItem: SectionItem,
         generation: Int,
@@ -174,8 +177,7 @@ struct MediaRow: View {
         focusedItemId = targetItem.contentId
         lastFocusedItemId = targetItem.contentId
         onItemFocus?(targetItem)
-        // Window must outlast the ~300ms animated ride home plus the engine's
-        // settling repairs, or the last mid-flight repair wins after all.
+        // Allow a bounded window for lazy layout and the engine's entry repair.
         guard attempt < 8 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             guard generation == focusRestorationGeneration,
@@ -317,12 +319,12 @@ struct MediaRow: View {
             if let icon {
                 Image(systemName: icon)
                     .font(.system(size: headerIconSize, weight: .semibold))
-                    .foregroundColor(.continuumOnSurface)
+                    .foregroundColor(.siloOnSurface)
             }
 
             Text(title)
-                .font(.continuumHeadline)
-                .foregroundColor(.continuumOnSurface)
+                .font(.siloHeadline)
+                .foregroundColor(.siloOnSurface)
 
             Spacer()
 
@@ -330,11 +332,11 @@ struct MediaRow: View {
                 Button("See All") {
                     onSeeAll()
                 }
-                .font(.continuumCaption)
-                .foregroundColor(.continuumOnSurface.opacity(0.6))
+                .font(.siloCaption)
+                .foregroundColor(.siloOnSurface.opacity(0.6))
             }
         }
-        .padding(.horizontal, ContinuumTheme.safePadding)
+        .padding(.horizontal, SiloTheme.safePadding)
     }
 
     // MARK: - Content
@@ -347,15 +349,16 @@ struct MediaRow: View {
 
     private func scrollStrip(_ rowProxy: ScrollViewProxy) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(spacing: cardSpacing) {
+            LazyHStack(alignment: HorizontalMediaRailLayout.cardAlignment, spacing: cardSpacing) {
                 ForEach(items) { item in
                     mediaCard(for: item)
                 }
             }
             #if !os(tvOS)
-            .padding(.horizontal, ContinuumTheme.safePadding)
+            .padding(.horizontal, SiloTheme.safePadding)
             #endif
             .padding(.vertical, verticalCardPadding)
+            .phoneMediaRailBounds()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         #if os(tvOS)
@@ -364,7 +367,7 @@ struct MediaRow: View {
         // the engine's scroll-to-focused both align to the margin-inset
         // viewport, so with inner padding they overshoot left by the gutter
         // width and then visibly drift back to the rest position.
-        .contentMargins(.horizontal, ContinuumTheme.safePadding, for: .scrollContent)
+        .contentMargins(.horizontal, SiloTheme.safePadding, for: .scrollContent)
         // tvOS focus lift expands cards on focus — give them breathing room
         // so they don't clip against the row above/below.
         .scrollClipDisabled()
@@ -397,6 +400,7 @@ struct MediaRow: View {
                 posterUrl: item.posterUrl ?? "",
                 thumbhash: item.posterThumbhash,
                 year: item.year,
+                subtitle: EpisodeCardCaption.line(for: item),
                 progress: progressValue(for: item),
                 userState: item.userState,
                 overlayData: OverlayData.from(item),
@@ -411,7 +415,7 @@ struct MediaRow: View {
                 onSetWatched: watchedToggleAction(for: item),
                 aspect: layout == .square ? .square : .poster,
                 cardWidthOverride: cardWidth,
-                episodeBadge: episodeBadge(for: item)
+                episodeAccessibilityLabel: episodeAccessibilityLabel(for: item)
             )
         case .thumbnail:
             EpisodeThumbCard(
@@ -563,19 +567,10 @@ struct MediaRow: View {
         item.type.lowercased() == "episode" ? (item.seriesTitle ?? item.title) : item.title
     }
 
-    /// "S2 · E10" badge for an episode rendered as a poster, so new episodes
-    /// of the same series stay distinguishable. `nil` for non-episodes.
-    private func episodeBadge(for item: SectionItem) -> String? {
-        #if os(tvOS)
-        // Landing-page episode cards on Apple TV intentionally reserve their
-        // artwork overlays for the server-controlled CardOverlays system.
-        return nil
-        #else
-        guard item.type.lowercased() == "episode",
-              let season = item.seasonNumber,
-              let episode = item.episodeNumber else { return nil }
-        return "S\(season) · E\(episode)"
-        #endif
+    /// Episode context for accessibility when a poster is captioned with its
+    /// series title.
+    private func episodeAccessibilityLabel(for item: SectionItem) -> String? {
+        EpisodeCardCaption.accessibilityLabel(for: item)
     }
 
     // MARK: - Metrics
@@ -584,7 +579,7 @@ struct MediaRow: View {
         #if os(tvOS)
         return 20
         #else
-        return ContinuumTheme.smallPadding
+        return SiloTheme.smallPadding
         #endif
     }
 
@@ -608,7 +603,7 @@ struct MediaRow: View {
         #if os(tvOS)
         return 40
         #else
-        return ContinuumTheme.spacing
+        return SiloTheme.spacing
         #endif
     }
 
@@ -627,6 +622,19 @@ struct MediaRow: View {
 }
 
 #if os(tvOS)
+/// Observe focus outside the row's body so moving between cards does not
+/// reconstruct the LazyHStack, artwork requests, and context-menu closures.
+private struct TVRowFocusObserver: ViewModifier {
+    let focusedItemId: FocusState<String?>.Binding
+    let onItemFocus: (String) -> Void
+
+    func body(content: Content) -> some View {
+        content.onChange(of: focusedItemId.wrappedValue) { _, itemId in
+            if let itemId { onItemFocus(itemId) }
+        }
+    }
+}
+
 /// Bridges the row's boundary up/down move commands to the host. Only
 /// attaches an `onMoveCommand` when at least one handler is supplied, so a
 /// row that should stay out of the focus path (e.g. a non-paged row)

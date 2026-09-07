@@ -114,7 +114,7 @@ struct SiloControlRemoteView: View {
     @ViewBuilder
     private var content: some View {
         if controller.isReconnecting {
-            statusView(title: "Reconnecting…", showSpinner: true)
+            reconnectingView
         } else if let state = controller.state, state.contentId == nil {
             idleConnectedView(state: state)
         } else if let state = controller.state {
@@ -139,22 +139,37 @@ struct SiloControlRemoteView: View {
         VStack(spacing: 18) {
             Image(systemName: "appletvremote.gen4")
                 .font(.system(size: 44, weight: .medium))
-                .foregroundStyle(Color.continuumOnSurface)
+                .foregroundStyle(Color.siloOnSurface)
             Text("Connected to \(controller.activeTarget?.name ?? "Silo TV")")
                 .font(.title3.weight(.semibold))
-                .foregroundStyle(Color.continuumOnSurface)
+                .foregroundStyle(Color.siloOnSurface)
             Text("Pick something from your library to start playing.")
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
-                .foregroundStyle(Color.continuumSecondaryText)
+                .foregroundStyle(Color.siloSecondaryText)
         }
         .padding(32)
     }
 
-    private func statusView(title: String, showSpinner: Bool) -> some View {
-        VStack(spacing: 14) {
-            if showSpinner { ProgressView() }
-            Text(title).font(.headline).foregroundStyle(Color.continuumSecondaryText)
+    private var reconnectingView: some View {
+        VStack(spacing: 18) {
+            ProgressView()
+            Text("Reconnecting to \(controller.lastTarget?.name ?? "Silo TV")…")
+                .font(.headline)
+                .foregroundStyle(Color.siloSecondaryText)
+            Text("Make sure the TV is on and on the same network.")
+                .font(.subheadline)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Color.siloSecondaryText)
+            Button {
+                controller.cancelReconnect()
+                dismiss()
+            } label: {
+                Text("Stop Reconnecting")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            .tint(Color.siloOnSurface)
         }
         .padding(32)
     }
@@ -162,16 +177,16 @@ struct SiloControlRemoteView: View {
     private var connectingView: some View {
         VStack(spacing: 18) {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.continuumSurfaceElevated)
+                .fill(Color.siloSurfaceElevated)
                 .frame(width: 150, height: 216)
             if let error = controller.errorMessage, !error.isEmpty {
                 Text(error)
                     .font(.subheadline)
-                    .foregroundStyle(Color.continuumOnSurface)
+                    .foregroundStyle(Color.siloOnSurface)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.continuumError.opacity(0.9)))
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.siloError.opacity(0.9)))
                 Button {
                     isShowingPicker = true
                 } label: {
@@ -179,12 +194,12 @@ struct SiloControlRemoteView: View {
                         .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
-                .tint(Color.continuumOnSurface)
+                .tint(Color.siloOnSurface)
             } else {
                 ProgressView()
                 Text("Connecting to \(controller.activeTarget?.name ?? "Silo TV")…")
                     .font(.headline)
-                    .foregroundStyle(Color.continuumSecondaryText)
+                    .foregroundStyle(Color.siloSecondaryText)
             }
         }
         .padding(24)
@@ -234,12 +249,12 @@ private struct RemoteNowPlayingContent: View {
                 AsyncImageView(url: posterURL, contentMode: .fit)
             } else {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.continuumSurfaceElevated)
+                    .fill(Color.siloSurfaceElevated)
                     .aspectRatio(2.0 / 3.0, contentMode: .fit)
                     .overlay {
                         Image(systemName: "tv")
                             .font(.system(size: 36))
-                            .foregroundStyle(Color.continuumSecondaryText)
+                            .foregroundStyle(Color.siloSecondaryText)
                     }
             }
         }
@@ -254,13 +269,13 @@ private struct RemoteNowPlayingContent: View {
                 .font(.title2.weight(.semibold))
                 .multilineTextAlignment(.center)
                 .lineLimit(2)
-                .foregroundStyle(Color.continuumOnSurface)
+                .foregroundStyle(Color.siloOnSurface)
             if let subtitle = state.subtitle, !subtitle.isEmpty {
                 Text(subtitle)
                     .font(.subheadline)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
-                    .foregroundStyle(Color.continuumSecondaryText)
+                    .foregroundStyle(Color.siloSecondaryText)
             }
         }
     }
@@ -274,10 +289,10 @@ private struct RemoteNowPlayingContent: View {
                 Text("Playing on \(targetName)")
                     .font(.caption.weight(.medium))
             }
-            .foregroundStyle(Color.continuumSecondaryText)
+            .foregroundStyle(Color.siloSecondaryText)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Capsule().fill(Color.continuumChromeRestingFill))
+            .background(Capsule().fill(Color.siloChromeRestingFill))
         }
     }
 
@@ -294,7 +309,7 @@ private struct RemoteNowPlayingContent: View {
                         self.scrubPreview = nil
                     }
                 )
-                .tint(Color.continuumOnSurface)
+                .tint(Color.siloOnSurface)
                 .disabled(state.duration <= 0)
                 .accessibilityLabel("Playback position")
                 .accessibilityValue(PlayerTimeFormatter.formatHMS(live))
@@ -305,7 +320,7 @@ private struct RemoteNowPlayingContent: View {
                     Text(remainingLabel(live: live))
                 }
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(Color.continuumSecondaryText)
+                .foregroundStyle(Color.siloSecondaryText)
             }
         }
     }
@@ -334,13 +349,13 @@ private struct RemoteNowPlayingContent: View {
                 onTogglePlayPause()
             } label: {
                 ZStack {
-                    Circle().fill(Color.continuumOnSurface).frame(width: 64, height: 64)
+                    Circle().fill(Color.siloOnSurface).frame(width: 64, height: 64)
                     if state.isLoading || state.isBuffering {
-                        ProgressView().tint(Color.continuumBackground)
+                        ProgressView().tint(Color.siloBackground)
                     } else {
                         Image(systemName: clock.isPlaying() ? "pause.fill" : "play.fill")
                             .font(.system(size: 28, weight: .medium))
-                            .foregroundStyle(Color.continuumBackground)
+                            .foregroundStyle(Color.siloBackground)
                     }
                 }
             }
@@ -362,7 +377,7 @@ private struct RemoteNowPlayingContent: View {
                 .accessibilityLabel(state.nextEpisodeTitle.map { "Next: \($0)" } ?? "Next episode")
             }
         }
-        .foregroundStyle(Color.continuumOnSurface)
+        .foregroundStyle(Color.siloOnSurface)
         .buttonStyle(.plain)
     }
 
@@ -383,17 +398,17 @@ private struct RemoteNowPlayingContent: View {
                 ),
                 in: 0...1
             )
-            .tint(Color.continuumOnSurface)
+            .tint(Color.siloOnSurface)
             .accessibilityLabel("Volume")
             .accessibilityValue("\(Int((state.isMuted ? 0 : state.volume) * 100)) percent")
 
             Image(systemName: "speaker.wave.3.fill")
                 .font(.system(size: 18, weight: .medium))
                 .frame(width: 28)
-                .foregroundStyle(Color.continuumOnSurface.opacity(0.55))
+                .foregroundStyle(Color.siloOnSurface.opacity(0.55))
         }
         .frame(maxWidth: 280)
-        .foregroundStyle(Color.continuumOnSurface)
+        .foregroundStyle(Color.siloOnSurface)
         .buttonStyle(.plain)
     }
 
@@ -535,12 +550,12 @@ private struct RemoteNowPlayingContent: View {
     private func errorBanner(_ message: String) -> some View {
         Text(message)
             .font(.footnote)
-            .foregroundStyle(Color.continuumOnSurface)
+            .foregroundStyle(Color.siloOnSurface)
             .multilineTextAlignment(.center)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .padding(.horizontal, 14)
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.continuumError.opacity(0.9)))
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.siloError.opacity(0.9)))
     }
 }
 
@@ -555,7 +570,7 @@ private struct RemoteChipLabel: View {
             Text(caption)
                 .font(.caption2)
         }
-        .foregroundStyle(Color.continuumOnSurface.opacity(0.9))
+        .foregroundStyle(Color.siloOnSurface.opacity(0.9))
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
     }

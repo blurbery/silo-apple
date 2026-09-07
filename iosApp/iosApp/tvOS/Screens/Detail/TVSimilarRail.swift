@@ -18,6 +18,7 @@ struct TVSimilarRail: View {
     let title: String
     let onSelect: (String) -> Void
     var focusRequest = 0
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @State private var items: [SimilarPosterItem] = []
     @State private var isLoading = true
@@ -41,6 +42,9 @@ struct TVSimilarRail: View {
             }
         }
         .task(id: contentId, priority: .background) { await load() }
+        .onChange(of: focusedItemId != nil) { _, focused in
+            onFocusChange?(focused)
+        }
         .onChange(of: focusRequest, initial: true) { _, _ in
             applyFocusRequestIfPossible()
         }
@@ -90,8 +94,8 @@ struct TVSimilarRail: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: cardSpacing) {
                 ForEach(0..<4, id: \.self) { _ in
-                    RoundedRectangle(cornerRadius: ContinuumTheme.cornerRadius)
-                        .fill(Color.continuumSurfaceElevated)
+                    RoundedRectangle(cornerRadius: SiloTheme.cornerRadius)
+                        .fill(Color.siloSurfaceElevated)
                         .frame(
                             width: cardWidth,
                             height: cardWidth * 1.5
@@ -144,7 +148,7 @@ struct TVSimilarRail: View {
         }
 
         do {
-            let scored = try await ContinuumAPI.shared.recommendationsSimilar(
+            let scored = try await SiloAPI.shared.recommendationsSimilar(
                 contentId: contentId,
                 limit: 12
             )
