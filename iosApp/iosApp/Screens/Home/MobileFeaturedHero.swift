@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import UIKit
 
 /// Server-driven Home spotlight for iPhone and iPad. The featured section is
 /// rendered once here and removed from the rows below.
@@ -11,7 +12,7 @@ struct MobileFeaturedHero: View {
     @State private var currentIndex = 0
 
     private var heroHeight: CGFloat {
-        min(max(PlatformScreen.mainBounds.height * 0.69, 610), 740)
+        min(max(UIScreen.main.bounds.height * 0.69, 610), 740)
     }
 
     var body: some View {
@@ -24,7 +25,7 @@ struct MobileFeaturedHero: View {
         .tabViewStyle(.page(indexDisplayMode: .never))
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
-        .background(Color.continuumBackground)
+        .background(Color.siloBackground)
         .clipped()
         .task(id: items.map(\.contentId)) {
             guard items.count > 1 else { return }
@@ -56,8 +57,8 @@ struct MobileFeaturedHero: View {
                     .init(color: .black.opacity(0.28), location: 0),
                     .init(color: .clear, location: 0.22),
                     .init(color: .black.opacity(0.32), location: 0.50),
-                    .init(color: Color.continuumBackground.opacity(0.86), location: 0.78),
-                    .init(color: Color.continuumBackground, location: 1),
+                    .init(color: Color.siloBackground.opacity(0.86), location: 0.78),
+                    .init(color: Color.siloBackground, location: 1),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -90,7 +91,7 @@ struct MobileFeaturedHero: View {
                 AsyncImageView(
                     url: url,
                     thumbhash: item.backdropThumbhash ?? item.posterThumbhash,
-                    targetSize: CGSize(width: PlatformScreen.mainBounds.width, height: heroHeight),
+                    targetSize: CGSize(width: UIScreen.main.bounds.width, height: heroHeight),
                     contentMode: .fill
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -103,7 +104,7 @@ struct MobileFeaturedHero: View {
                     url: url,
                     thumbhash: item.backdropThumbhash ?? item.posterThumbhash,
                     targetSize: CGSize(
-                        width: PlatformScreen.mainBounds.width,
+                        width: UIScreen.main.bounds.width,
                         height: heroHeight * 0.74
                     ),
                     contentMode: .fill
@@ -115,7 +116,7 @@ struct MobileFeaturedHero: View {
             .backgroundExtensionEffect()
             .transition(.opacity.animation(.easeInOut(duration: 0.45)))
         } else {
-            Color.continuumSurface
+            Color.siloSurface
         }
     }
 
