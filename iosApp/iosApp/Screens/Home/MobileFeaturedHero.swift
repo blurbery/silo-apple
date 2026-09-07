@@ -113,7 +113,7 @@ struct MobileFeaturedHero: View {
                 .frame(height: heroHeight * 0.74, alignment: .top)
                 .clipped()
             }
-            .backgroundExtensionEffect()
+            .modifier(MobileFeaturedBackgroundExtension())
             .transition(.opacity.animation(.easeInOut(duration: 0.45)))
         } else {
             Color.siloSurface
@@ -235,6 +235,17 @@ struct MobileFeaturedHero: View {
     private func playLabel(for item: SectionItem) -> String {
         guard let position = item.positionSeconds, position > 60 else { return "Play" }
         return "Resume"
+    }
+}
+
+private struct MobileFeaturedBackgroundExtension: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.backgroundExtensionEffect()
+        } else {
+            content
+        }
     }
 }
 #endif
