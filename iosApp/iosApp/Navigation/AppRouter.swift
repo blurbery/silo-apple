@@ -1,5 +1,8 @@
 import OSLog
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 /// The ordered cards surrounding a detail presentation. iOS uses this to
 /// turn the open detail sheet into a small, source-aware deck: horizontal
@@ -289,6 +292,7 @@ class AppRouter {
             backdropURL: backdropURL
         )
         #if os(iOS)
+        resignKeyboardForPresentation()
         presentation.detailPresentationID = presentedItemDetail?.id
         #endif
         presentedPlayer = presentation
@@ -333,6 +337,7 @@ class AppRouter {
             backdropURL: nil
         )
         #if os(iOS)
+        resignKeyboardForPresentation()
         presentation.detailPresentationID = presentedItemDetail?.id
         #endif
         presentedPlayer = presentation
@@ -368,9 +373,28 @@ class AppRouter {
     }
     #endif
 
+    #if os(iOS)
+    /// The keyboard lives in its own window above sheets and full-screen
+    /// covers, so any presentation must resign it explicitly. SwiftUI focus
+    /// bindings alone are unreliable here: a focus change issued after the
+    /// presentation transaction begins can be dropped, leaving the keyboard
+    /// visible over the detail sheet and player (seen when playing a title
+    /// straight from search). Called synchronously before mutating
+    /// presentation state, while the field is still in the active window.
+    private func resignKeyboardForPresentation() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
+    #endif
+
     /// Push a route onto the navigation stack.
     func navigate(to route: Route) {
         #if os(iOS)
+        resignKeyboardForPresentation()
         if case .itemDetail(let contentId, _) = route {
             presentItemDetail(contentId: contentId)
             return
@@ -404,6 +428,7 @@ class AppRouter {
         resumeContext: ItemDetailResumeContext? = nil
     ) {
         #if os(iOS)
+        resignKeyboardForPresentation()
         recordScreenBreadcrumb(target: "itemDetail", action: "present")
         if presentedItemDetail == nil {
             let source = browseSource.flatMap { source in

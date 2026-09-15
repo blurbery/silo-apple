@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 /// Full-screen search with debounced query and grid results — Plezy style.
 struct SearchView: View {
@@ -7,6 +10,7 @@ struct SearchView: View {
     @State private var navPrefs = AppNavPreferences.shared
     @Environment(AppRouter.self) private var router
     #if os(iOS)
+    @Environment(\.dismissSearch) private var dismissSearch
     @FocusState private var isSearchFieldFocused: Bool
     #endif
     private let usesTVTopMenuInset: Bool
@@ -66,15 +70,15 @@ struct SearchView: View {
             await focusSearchField()
         }
         // Opening a result presents a sheet, and Play then covers it with the
-        // player. UIKit resigns the search field for the sheet, but SwiftUI
-        // still holds the focus binding as true, so it re-asserts focus and
-        // brings the keyboard back once the cover tears down. Release focus
-        // when a presentation begins so returning lands on the results.
+        // player. The keyboard lives in its own window above both, so focus
+        // must be released synchronously on tap — clearing it after the
+        // presentation transaction starts can be dropped, leaving the
+        // keyboard visible over the detail/player.
         .onChange(of: router.presentedItemDetail?.id) { _, presentedID in
-            if presentedID != nil { isSearchFieldFocused = false }
+            if presentedID != nil { dismissKeyboardForNavigation() }
         }
         .onChange(of: router.presentedPlayer?.id) { _, presentedID in
-            if presentedID != nil { isSearchFieldFocused = false }
+            if presentedID != nil { dismissKeyboardForNavigation() }
         }
         #endif
         .onChange(of: viewModel.query) { _, _ in
@@ -131,6 +135,23 @@ struct SearchView: View {
         await Task.yield()
         isSearchFieldFocused = true
     }
+
+    /// Release the search field before a result navigation presents its
+    /// sheet. Runs synchronously in the tap handler while the field is still
+    /// in the active window: the SwiftUI focus binding alone is not enough,
+    /// since a focus change issued after the presentation transaction begins
+    /// can be dropped and the keyboard (its own window, above sheets and
+    /// covers) stays visible over the detail and player.
+    private func dismissKeyboardForNavigation() {
+        isSearchFieldFocused = false
+        dismissSearch()
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
     #endif
 
     // MARK: - Shared Content
@@ -183,7 +204,12 @@ struct SearchView: View {
                     items: viewModel.results,
                     isLoading: viewModel.isSearching,
                     hasMore: viewModel.hasMore,
-                    onItemTap: { router.navigate(to: .itemDetail(browseItem: $0)) },
+                    onItemTap: {
+                        #if os(iOS)
+                        dismissKeyboardForNavigation()
+                        #endif
+                        router.navigate(to: .itemDetail(browseItem: $0))
+                    },
                     onLoadMore: {
                         Task { await viewModel.loadMore() }
                     }
