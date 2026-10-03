@@ -263,14 +263,16 @@ struct TVSeriesDetailView<BelowSynopsis: View>: View {
                         VStack(alignment: .leading, spacing: TVDetailLayout.bodySectionSpacing) {
                             episodeExperience
                                 .id(episodeSectionScrollId)
-                            if let cast = detail.cast, !cast.isEmpty {
-                                castSection(cast: cast)
+                            if hasCast {
+                                castSection(groups: castCrewGroups)
                                     .id(castSectionScrollId)
                             }
                             trailersSection
                             similarSection
                                 .id(similarSectionScrollId)
-                            detailsSection
+                            if hasDetailFacts {
+                                detailsSection
+                            }
                         }
                         .padding(.horizontal, TVDetailLayout.horizontalInset)
                         .padding(.bottom, TVDetailLayout.pageBottomPadding)
@@ -1007,11 +1009,11 @@ struct TVSeriesDetailView<BelowSynopsis: View>: View {
         }
     }
 
-    private func castSection(cast: [CastMember]) -> some View {
+    private func castSection(groups: [CastCrewGroup]) -> some View {
         VStack(alignment: .leading, spacing: TVDetailLayout.sectionHeaderSpacing) {
             TVSectionHeader(title: "Cast & Crew")
             TVDetailCastRail(
-                cast: cast,
+                groups: groups,
                 onTap: onPersonTap,
                 focusRequest: supportingRailFocusRequest,
                 onFocusChange: { focused in
@@ -1026,14 +1028,26 @@ struct TVSeriesDetailView<BelowSynopsis: View>: View {
         }
     }
 
+    /// Creators, writers and cast in one row. Series creators are stored as
+    /// Director credits, so they are captioned "Creator".
+    private var castCrewGroups: [CastCrewGroup] {
+        CastCrewGroups.build(cast: detail.cast, crew: detail.crew, leadRole: .creator)
+    }
+
+    /// Whether the Cast & Crew row is shown. It also decides which supporting
+    /// rail receives the Episodes handoff, so it must match the row itself.
     private var hasCast: Bool {
-        !(detail.cast?.isEmpty ?? true)
+        !castCrewGroups.isEmpty
+    }
+
+    private var hasDetailFacts: Bool {
+        !DetailFacts(detail: detail, includesCredits: false).assembleFacts().isEmpty
     }
 
     private var detailsSection: some View {
         VStack(alignment: .leading, spacing: TVDetailLayout.sectionHeaderSpacing) {
             TVSectionHeader(title: "Details")
-            TVDetailFactsSection(detail: detail)
+            TVDetailFactsSection(detail: detail, includesCredits: false)
         }
     }
 }

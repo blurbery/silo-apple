@@ -116,8 +116,8 @@ struct TVMovieDetailView<BelowSynopsis: View>: View {
                                 episodesSection
                                     .id(episodeSectionScrollId)
                             }
-                            if let cast = supportingCast, !cast.isEmpty {
-                                castSection(cast: cast)
+                            if !castCrewGroups.isEmpty {
+                                castSection(groups: castCrewGroups)
                             }
                             trailersSection
                             if showsSimilarRail {
@@ -125,7 +125,9 @@ struct TVMovieDetailView<BelowSynopsis: View>: View {
                                     .focused($similarRailFocused)
                                     .id(similarSectionScrollId)
                             }
-                            detailsSection
+                            if showsDetailsSection {
+                                detailsSection
+                            }
                         }
                         .padding(.horizontal, TVDetailLayout.horizontalInset)
                         .padding(.bottom, TVDetailLayout.pageBottomPadding)
@@ -319,6 +321,15 @@ struct TVMovieDetailView<BelowSynopsis: View>: View {
         detail.type == "episode" && !seasonEpisodes.isEmpty
     }
 
+    /// Movies get the grouped director, writers and cast row. Episodes keep
+    /// their cast-only rail from the supporting series.
+    private var castCrewGroups: [CastCrewGroup] {
+        if detail.type == "movie" {
+            return CastCrewGroups.build(cast: detail.cast, crew: detail.crew, leadRole: .director)
+        }
+        return CastCrewGroups.castOnly(supportingCast ?? [])
+    }
+
     private var supportingCast: [CastMember]? {
         if detail.type == "episode",
            let cast = supportingDetail?.cast,
@@ -417,10 +428,10 @@ struct TVMovieDetailView<BelowSynopsis: View>: View {
     // MARK: - Cast
 
     @ViewBuilder
-    private func castSection(cast: [CastMember]) -> some View {
+    private func castSection(groups: [CastCrewGroup]) -> some View {
         VStack(alignment: .leading, spacing: TVDetailLayout.sectionHeaderSpacing) {
             TVSectionHeader(title: "Cast & Crew")
-            TVDetailCastRail(cast: cast, onTap: onPersonTap)
+            TVDetailCastRail(groups: groups, onTap: onPersonTap)
         }
     }
 
@@ -429,8 +440,21 @@ struct TVMovieDetailView<BelowSynopsis: View>: View {
     private var detailsSection: some View {
         VStack(alignment: .leading, spacing: TVDetailLayout.sectionHeaderSpacing) {
             TVSectionHeader(title: "Details")
-            TVDetailFactsSection(detail: detail)
+            TVDetailFactsSection(detail: detail, includesCredits: factsIncludeCredits)
         }
+    }
+
+    /// Movie directors and writers now live in the Cast & Crew row, so the
+    /// facts list drops them there. Episodes keep them.
+    private var factsIncludeCredits: Bool {
+        detail.type != "movie"
+    }
+
+    /// Hides the Details header on a movie whose only facts were credits.
+    /// Episode pages keep their existing layout.
+    private var showsDetailsSection: Bool {
+        factsIncludeCredits
+            || !DetailFacts(detail: detail, includesCredits: false).assembleFacts().isEmpty
     }
 
     // MARK: - Version data
